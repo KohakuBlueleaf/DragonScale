@@ -15,7 +15,7 @@ from dragonscale.patch import Session, apply
 from dragonscale.plan import PRESETS, LayerPlan, Plan, Rule, make_plan, preset, validate
 from dragonscale.spec import RowSpec, defaults
 
-__version__ = "0.0.1"
+__version__ = "0.1.0"
 
 __all__ = [
     "PRESETS",
