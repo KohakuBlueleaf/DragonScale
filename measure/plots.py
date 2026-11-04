@@ -31,6 +31,7 @@ PRESETS = ("stock", "matrices", "arch")
 COLORS = {"stock": "#D55E00", "matrices": "#0072B2", "arch": "#009E73"}  # Okabe-Ito
 PRECISION_STYLE = {"fp16": "-", "fp32": "--"}
 LR_STYLES = ("-", "--", ":")
+BYTE_LM = "byte-level LM on the Python standard library"
 
 plt.rcParams.update(
     {
@@ -152,12 +153,18 @@ def preset_legend(ax, extra: list | None = None, **kwargs) -> None:
 def top_legend(fig, extra: list | None = None) -> None:
     """One legend for the whole figure, in a row above the panels."""
     handles = legend_handles(extra)
-    fig.legend(
+    fig.top_legend = fig.legend(
         handles=handles,
         loc="outside upper center",
         ncol=len(handles),
         frameon=False,
     )
+
+
+def headline(fig, text: str) -> None:
+    """The figure's one-line description: model, task, length and what varies. It becomes the
+    title of the top legend when there is one, so the two never overlap."""
+    fig.headline = text
 
 
 def footnote(fig, text: str) -> None:
@@ -167,6 +174,12 @@ def footnote(fig, text: str) -> None:
 def save(fig, name: str) -> None:
     for ax in fig.axes:
         label_better(ax)
+    text = getattr(fig, "headline", None)
+    legend = getattr(fig, "top_legend", None)
+    if text and legend is not None:
+        legend.set_title(text, prop={"size": 11, "weight": "bold"})
+    elif text:
+        fig.suptitle(text, fontsize=11, fontweight="bold")
     path = figure_path(name)
     fig.savefig(path, dpi=DPI, bbox_inches="tight")
     plt.close(fig)
@@ -211,6 +224,10 @@ def figure_a() -> None:
     loss.set_ylim(top=1.22)
     styles = [Line2D([], [], color="0.3", ls=s, label=p) for p, s in PRECISION_STYLE.items()]
     top_legend(fig, styles)
+    headline(
+        fig,
+        f"Learning rate x precision: {BYTE_LM}, 8 blocks, dim 256, 5k steps",
+    )
     footnote(fig, "x above a panel: the run failed (diverged, or never got below loss 2)")
     save(fig, "a_lr_precision")
 
@@ -268,10 +285,14 @@ def figure_b() -> None:
         Line2D([], [], color="0.3", ls=LR_STYLES[i], label=f"lr {lr:g}") for i, lr in enumerate(lrs)
     ]
     top_legend(fig, styles)
+    headline(
+        fig,
+        f"Growth over 100k steps: {BYTE_LM}, 8 blocks, dim 256, fp16",
+    )
     footnote(
         fig,
-        "100k steps, fp16; stock at lr 0.01 diverged near step 1k. Raw rows: stock's weights are "
-        "what the layer uses; the patched models' raw rows do not reach the output",
+        "stock at lr 0.01 diverged near step 1k. Raw rows: stock's weights are what the layer "
+        "uses; the patched models' raw rows do not reach the output",
     )
     save(fig, "b_long")
 
@@ -296,7 +317,12 @@ def figure_sweep(experiment: str, name: str, label: str) -> None:
         better(ax, "down")
     axes[0].set_ylabel("peak residual stream |x|")
     top_legend(fig)
-    footnote(fig, "5k steps, fp16; x above a panel: the run failed")
+    shape = "dim 256" if label == "depth" else "8 blocks"
+    headline(
+        fig,
+        f"Peak stream vs {label}: {BYTE_LM}, {shape}, 5k steps, fp16",
+    )
+    footnote(fig, "x above a panel: the run failed")
     save(fig, experiment.split("_", 1)[1])
 
     lrs = sorted({knob(r, "LR") for r in runs})
@@ -346,36 +372,102 @@ def table_d() -> None:
 # ---- stream vs loss ----
 
 
-def figure_pareto() -> None:
-    """Every 5k-step byte-LM run that trained: peak stream against final held-out loss."""
-    marks = {"fp16": "o", "fp32": "s", "wd": "^"}
-    fig, (ax,) = figure(1, width=7.5)
+def pareto_points() -> list[dict]:
+    """Every finished 5k-step byte-LM run that trained: setup, learning rate, stream and loss."""
+    points = []
     for experiment in ("a_lr_precision", "c_depth", "d_weight_decay", "e_width"):
         for run in runs_of(experiment):
             if run["failed"] or run["done"] != "finished" or not math.isfinite(peak(run)):
                 continue
+            setup = tuple(
+                knob(run, k) for k in ("PRESET", "PRECISION", "DEPTH", "DIM", "WEIGHT_DECAY")
+            )
             kind = "wd" if knob(run, "WEIGHT_DECAY") else knob(run, "PRECISION")
+            points.append(
+                {
+                    "setup": setup,
+                    "preset": knob(run, "PRESET"),
+                    "kind": kind,
+                    "lr": knob(run, "LR"),
+                    "stream": peak(run),
+                    "loss": run["final"],
+                }
+            )
+    return points
+
+
+def frontier(points: list[dict]) -> list[dict]:
+    """The points no other point beats on both stream and loss, by stream."""
+    out, best = [], math.inf
+    for point in sorted(points, key=lambda p: (p["stream"], p["loss"])):
+        if point["loss"] < best:
+            out.append(point)
+            best = point["loss"]
+    return out
+
+
+def figure_pareto(lines: str = "frontier") -> None:
+    """Peak stream against final held-out loss; `lines` is "frontier" (each preset's Pareto
+    frontier) or "setups" (each setup through its learning rates)."""
+    marks = {"fp16": "o", "fp32": "s", "wd": "^"}
+    points = pareto_points()
+    fig, (ax,) = figure(1, width=8)
+    faint = 0.35 if lines == "frontier" else 0.8
+    for point in points:
+        ax.scatter(
+            point["stream"],
+            point["loss"],
+            s=20,
+            marker=marks[point["kind"]],
+            color=COLORS[point["preset"]],
+            alpha=faint,
+            edgecolors="none",
+        )
+    if lines == "frontier":
+        for preset in PRESETS:
+            edge = frontier([p for p in points if p["preset"] == preset])
+            ax.step(
+                [p["stream"] for p in edge],
+                [p["loss"] for p in edge],
+                where="post",
+                color=COLORS[preset],
+                lw=2.2,
+            )
             ax.scatter(
-                peak(run),
-                run["final"],
-                s=22,
-                marker=marks[kind],
-                color=COLORS[knob(run, "PRESET")],
-                alpha=0.75,
-                edgecolors="none",
+                [p["stream"] for p in edge], [p["loss"] for p in edge], s=26, color=COLORS[preset]
+            )
+    else:
+        setups = defaultdict(list)
+        for point in points:
+            setups[point["setup"]].append(point)
+        for group in setups.values():
+            group.sort(key=lambda p: p["lr"])
+            style = ":" if group[0]["kind"] == "wd" else PRECISION_STYLE[group[0]["kind"]]
+            ax.plot(
+                [p["stream"] for p in group],
+                [p["loss"] for p in group],
+                style,
+                color=COLORS[group[0]["preset"]],
+                lw=1.0,
+                alpha=0.7,
             )
     ax.set(
-        xscale="log",
-        xlabel="peak residual stream |x|",
-        ylabel="final held-out loss (nats / byte)",
-        title="every finished byte-LM run that trained (5k steps)",
+        xscale="log", xlabel="peak residual stream |x|", ylabel="final held-out loss (nats / byte)"
     )
     log_axis(ax.xaxis)
     better(ax, "down-left")
     names = {"fp16": "fp16", "fp32": "fp32", "wd": "stock + weight decay"}
     kinds = [Line2D([], [], color="0.3", marker=m, ls="", label=names[k]) for k, m in marks.items()]
     preset_legend(ax, kinds, loc="upper left")
-    save(fig, "pareto")
+    headline(fig, f"Stream vs loss: every finished 5k-step run of the {BYTE_LM}")
+    what = (
+        "lines: each preset's Pareto frontier (no run of that preset is better on both)"
+        if lines == "frontier"
+        else "lines: one setup (preset, precision, depth, width, weight decay) through its "
+        "learning rates"
+    )
+    footnote(fig, f"{what}; failed runs left out")
+    save(fig, "pareto" if lines == "frontier" else "pareto_setups")
 
 
 # ---- JiT ----
@@ -412,7 +504,7 @@ def figure_jit() -> None:
         Line2D([], [], color="0.3", ls=LR_STYLES[i], label=f"lr {lr:g}") for i, lr in enumerate(lrs)
     ]
     top_legend(fig, styles)
-    footnote(fig, "JiT-B/16 on Flowers-102, 256 px, batch 64, fp16")
+    headline(fig, "JiT-B/16 pixel diffusion on Flowers-102: 256 px, batch 64, 10k steps, fp16")
     save(fig, "jit")
 
 
@@ -424,6 +516,7 @@ def main() -> None:
         "width": lambda: figure_sweep("e_width", "DIM", "width"),
         "d": table_d,
         "pareto": figure_pareto,
+        "pareto_setups": lambda: figure_pareto("setups"),
         "jit": figure_jit,
     }
     for name, make in figures.items():

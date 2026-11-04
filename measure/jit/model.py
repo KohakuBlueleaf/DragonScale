@@ -12,7 +12,7 @@ so the model has no gates, no modulation and no zero-initialized layer.
 | `stock` | RMSNorm with affine, QK-norm with a gain on q and on k | none |
 | `matrices` | `stock` | `suggest(level="matrices")`: unit rows and a channel gain on every layer |
 | `arch` | norms without affine, QK-norm with a gain on q only | `suggest(level="absorb")` and |
-| | | `absorb_plan` |
+| | | `absorb_plan`; without the final norm the output layer has unit rows and no gain |
 """
 
 import dataclasses
@@ -149,6 +149,7 @@ class Block(nn.Module):
         self.mlp = SwiGLU(shape.dim, int(shape.dim * 4 * 2 / 3))
         self.modulation = Modulation(shape.dim, CHUNKS) if adaln else None
         self.stats: dict | None = None
+        self.prefix = 0  # tokens in front of the image tokens, set by the model before each call
 
     def forward(self, x, c, cos, sin):
         stats = self.stats
@@ -167,12 +168,21 @@ class Block(nn.Module):
             x = x + m["gate_mlp"] * mlp
         if stats is not None:
             with torch.no_grad():
-                f = x.float()
+                f, n = x.float(), self.prefix
                 stats["stream_rms"] = f.square().mean().sqrt()
                 stats["stream_max"] = f.abs().max()
                 stats["channel_max"] = f.square().mean(dim=(0, 1)).sqrt().max()
                 stats["attn_out_rms"] = attn.float().square().mean().sqrt()
                 stats["mlp_out_rms"] = mlp.float().square().mean().sqrt()
+                image = f[:, n:]
+                stats["image_rms"] = image.square().mean().sqrt()
+                stats["image_max"] = image.abs().max()
+                stats["image_mlp_rms"] = mlp[:, n:].float().square().mean().sqrt()
+                stats["image_attn_rms"] = attn[:, n:].float().square().mean().sqrt()
+                if n:
+                    stats["prefix_rms"] = f[:, :n].square().mean().sqrt()
+                    stats["prefix_max"] = f[:, :n].abs().max()
+                    stats["cond_rms"] = f[:, 0].square().mean().sqrt()
                 for name, value in m.items():
                     stats[f"{name}_max"] = value.float().abs().max()
         return x
@@ -180,10 +190,16 @@ class Block(nn.Module):
 
 class JiT(nn.Module):
     """JiT; `adaln` False conditions by tokens: the time + class embedding is one token in front of
-    the image tokens from block 0, and nothing is zero-initialized."""
+    the image tokens from block 0, and nothing is zero-initialized. `final_norm` False lets the
+    output layer read the residual stream directly."""
 
     def __init__(
-        self, shape: Shape, affine: bool = True, qk_affine=(True, True), adaln: bool = True
+        self,
+        shape: Shape,
+        affine: bool = True,
+        qk_affine=(True, True),
+        adaln: bool = True,
+        final_norm: bool = True,
     ):
         super().__init__()
         self.shape = shape
@@ -204,7 +220,7 @@ class JiT(nn.Module):
         self.blocks = nn.ModuleList(
             Block(shape, affine, qk_affine, adaln) for _ in range(shape.depth)
         )
-        self.norm = nn.RMSNorm(dim, eps=1e-6, elementwise_affine=affine)
+        self.norm = nn.RMSNorm(dim, eps=1e-6, elementwise_affine=affine) if final_norm else None
         self.final_modulation = Modulation(dim, ("shift", "scale")) if adaln else None
         self.out = nn.Linear(dim, shape.patch * shape.patch * 3)
         self.init_weights()
@@ -245,13 +261,18 @@ class JiT(nn.Module):
         if not self.adaln:
             x = torch.cat([c.unsqueeze(1), x], dim=1)
         cos, sin = self.rope_cos.to(z.dtype), self.rope_sin.to(z.dtype)
+        prefix = self.prefix
         for i, block in enumerate(self.blocks):
             if i == s.in_context_start:
                 ctx = (y_emb.unsqueeze(1) + self.in_context_pos).to(x.dtype)
                 x = torch.cat([x[:, : self.prefix], ctx, x[:, self.prefix :]], dim=1)
                 cos, sin = self.rope_ctx_cos.to(z.dtype), self.rope_ctx_sin.to(z.dtype)
+                prefix = self.prefix + s.in_context
+            block.prefix = prefix
             x = block(x, c, cos, sin)
-        x = self.norm(x[:, self.prefix + s.in_context :])
+        x = x[:, self.prefix + s.in_context :]
+        if self.norm is not None:
+            x = self.norm(x)
         if self.final_modulation is not None:
             m = self.final_modulation(c)
             x = modulate(x, m["shift"], m["scale"])
@@ -260,17 +281,35 @@ class JiT(nn.Module):
         return torch.einsum("nhwpqc->nchpwq", x).reshape(z.shape)
 
 
-def build(preset: str, shape: Shape, sample: tuple, device: torch.device, adaln: bool = False):
+def build(
+    preset: str,
+    shape: Shape,
+    sample: tuple,
+    device: torch.device,
+    adaln: bool = False,
+    final_norm: bool = True,
+):
     """The model of `preset` on `device`, and its session (None for `stock`); `sample` is one
     (z, t, y) model input for the analysis."""
     arch = preset == "arch"
-    model = JiT(shape, affine=not arch, qk_affine=(True, not arch), adaln=adaln).to(device)
+    model = JiT(
+        shape, affine=not arch, qk_affine=(True, not arch), adaln=adaln, final_norm=final_norm
+    ).to(device)
     match preset:
         case "stock":
             return model, None
         case "matrices":
             return model, ds.apply(model, ds.analysis.suggest(model, *sample, level="matrices"))
         case "arch":
-            plan = ds.analysis.suggest(model, *sample, level="absorb")
-            return model, ds.apply(model, ds.analysis.absorb_plan(model, plan, *sample))
+            plan = ds.analysis.absorb_plan(
+                model, ds.analysis.suggest(model, *sample, level="absorb"), *sample
+            )
+            if not final_norm:
+                # The stream's scale reaches the output; the output layer keeps no gain of its own
+                layers = tuple(
+                    dataclasses.replace(p, mode="unit", init="ones") if p.path == "out" else p
+                    for p in plan
+                )
+                plan = dataclasses.replace(plan, layers=layers)
+            return model, ds.apply(model, plan)
     raise ValueError(f"preset {preset!r} not in {PRESETS}")

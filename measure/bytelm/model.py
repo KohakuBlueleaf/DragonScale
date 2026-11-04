@@ -5,8 +5,9 @@ presets the experiments compare.
 | --- | --- | --- |
 | `stock` | RMSNorm with affine | none |
 | `matrices` | `stock` | `suggest(level="matrices")`: unit rows and a channel gain on every layer |
-| `arch` | norms without affine, QK-norm with a gain on q only | `suggest(level="absorb")` and |
-| | | `absorb_plan`; q, k (followed by QK-norm) and both embeddings unit rows without gain |
+| `arch` | norms without affine, QK-norm with a gain on q only, no final norm | `suggest(level=` |
+| | | `"absorb")` and `absorb_plan`; q, k (followed by QK-norm), both embeddings and the head |
+| | | unit rows without gain |
 """
 
 import dataclasses
@@ -21,7 +22,7 @@ import dragonscale as ds
 
 VOCAB = 256
 PRESETS = ("stock", "matrices", "arch")
-FIXED_SCALE = re.compile(r"(embed|pos|blocks\.\d+\.(q|k))")
+FIXED_SCALE = re.compile(r"(embed|pos|head|blocks\.\d+\.(q|k))")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -89,12 +90,16 @@ def magnitudes(x, q, k, gate, up) -> dict:
 
 
 class LM(nn.Module):
-    def __init__(self, shape: Shape, affine: bool, qk_norm: bool):
+    """`final_norm` False lets the head read the residual stream directly."""
+
+    def __init__(self, shape: Shape, affine: bool, qk_norm: bool, final_norm: bool = True):
         super().__init__()
         self.embed = nn.Embedding(VOCAB, shape.dim)
         self.pos = nn.Embedding(shape.context, shape.dim)
         self.blocks = nn.ModuleList(Block(shape, affine, qk_norm) for _ in range(shape.depth))
-        self.norm = nn.RMSNorm(shape.dim, eps=1e-6, elementwise_affine=affine)
+        self.norm = (
+            nn.RMSNorm(shape.dim, eps=1e-6, elementwise_affine=affine) if final_norm else None
+        )
         self.head = nn.Linear(shape.dim, VOCAB, bias=False)
         with torch.no_grad():
             self.pos.weight.mul_(0.1)
@@ -106,16 +111,17 @@ class LM(nn.Module):
                 block.down.weight.mul_((2 * shape.depth) ** -0.5)
 
     def forward(self, tokens):
-        x = self.embed(tokens) + self.pos.weight[: tokens.shape[1]]
+        positions = torch.arange(tokens.shape[1], device=tokens.device)
+        x = self.embed(tokens) + self.pos(positions)
         for block in self.blocks:
             x = block(x)
-        return self.head(self.norm(x))
+        return self.head(self.norm(x) if self.norm is not None else x)
 
 
 def build(preset: str, shape: Shape, sample: torch.Tensor, device: torch.device):
     """The model of `preset` on `device`, and its session (None for `stock`)."""
     arch = preset == "arch"
-    model = LM(shape, affine=not arch, qk_norm=arch).to(device)
+    model = LM(shape, affine=not arch, qk_norm=arch, final_norm=not arch).to(device)
     match preset:
         case "stock":
             return model, None

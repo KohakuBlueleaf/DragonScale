@@ -51,6 +51,7 @@ LABEL_DROP = 0.1
 
 # ---- model and data (JiT-B/16 at 256 px) ----
 CONDITIONING = "tokens"  # "tokens" (time + class token, no zero init) | "adaln" (adaLN-Zero)
+FINAL_NORM = True  # False: the output layer reads the residual stream directly
 IMAGE = 256
 PATCH = 16
 DEPTH = 12
@@ -69,7 +70,7 @@ BUILD_CACHE = False  # write data/flowers102/images<IMAGE>.pt and stop
 
 KNOBS = (
     "PRESET LR STEPS WARMUP BATCH BETA2 PRECISION SEED P_MEAN P_STD T_EPS NOISE LABEL_DROP "
-    "CONDITIONING IMAGE PATCH DEPTH DIM HEADS HELD ATTENTION LOG_EVERY"
+    "CONDITIONING FINAL_NORM IMAGE PATCH DEPTH DIM HEADS HELD ATTENTION LOG_EVERY"
 ).split()
 NULL_CLASS = 102
 
@@ -113,7 +114,8 @@ def environment(device: torch.device) -> dict:
 
 
 def run_name() -> str:
-    return f"{PRESET}-{CONDITIONING}-lr{LR:g}-{PRECISION}-b{BATCH}-s{STEPS}"
+    final = "" if FINAL_NORM else "-nofinal"
+    return f"{PRESET}-{CONDITIONING}{final}-lr{LR:g}-{PRECISION}-b{BATCH}-s{STEPS}"
 
 
 def main() -> None:
@@ -135,7 +137,9 @@ def main() -> None:
     images = Images(IMAGE, BATCH, HELD, SEED, device)
     shape = Shape(image=IMAGE, patch=PATCH, depth=DEPTH, dim=DIM, heads=HEADS)
     sample = (images.held_x[:2], images.held_t[:2], images.held_y[:2])
-    model, session = build(PRESET, shape, sample, device, adaln=CONDITIONING == "adaln")
+    model, session = build(
+        PRESET, shape, sample, device, adaln=CONDITIONING == "adaln", final_norm=FINAL_NORM
+    )
     optimizer = torch.optim.AdamW(model.parameters(), lr=LR, betas=(0.9, BETA2), weight_decay=0)
     fp16 = PRECISION == "fp16"
     scaler = torch.amp.GradScaler(enabled=fp16)
