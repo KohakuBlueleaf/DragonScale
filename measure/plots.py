@@ -508,6 +508,73 @@ def figure_jit() -> None:
     save(fig, "jit")
 
 
+def figure_final_norm() -> None:
+    """JiT at lr 1e-3: the image tokens' stream per block at the last step, and its peak over
+    training, for stock, arch with a final norm, arch without it, and arch with input norms."""
+    variants = (
+        ("jit_diag", "stock-tokens-lr", "stock (final norm)", COLORS["stock"], "-"),
+        ("jit_diag", "arch-tokens-lr", "arch with final norm", COLORS["arch"], "--"),
+        ("jit_diag", "arch-tokens-nofinal", "arch, no final norm", COLORS["matrices"], "-"),
+        (
+            "jit_diag_input_norm",
+            "arch-tokens-nofinal",
+            "arch, no final norm, input norms",
+            "0.15",
+            "-",
+        ),
+    )
+    fig, (blocks, steps) = figure(2, width=11)
+    handles = []
+    for folder, prefix, label, color, style in variants:
+        paths = sorted((RUNS / "jit" / folder).glob(f"{prefix}*.jsonl"))
+        if not paths:
+            continue
+        run = read_run(paths[0])
+        logs = [r for r in run["logs"] if r["step"] > 0 and "blocks.0/image_rms" in r]
+        if not logs:
+            continue
+        last = logs[-1]
+        depth = sum(1 for k in last if k.startswith("blocks.") and k.endswith("/image_rms"))
+        blocks.plot(
+            range(depth),
+            [last[f"blocks.{j}/image_rms"] for j in range(depth)],
+            style,
+            color=color,
+            marker="o",
+            ms=3.5,
+            lw=1.6,
+        )
+        peak_by_step = [max(r[f"blocks.{j}/image_max"] for j in range(depth)) for r in logs]
+        steps.plot([r["step"] for r in logs], peak_by_step, style, color=color, lw=1.6)
+        handles.append(
+            Line2D(
+                [],
+                [],
+                color=color,
+                ls=style,
+                lw=2,
+                label=f"{label} (loss {run['best']:.3f}, step {last['step']})",
+            )
+        )
+    blocks.set(
+        yscale="log",
+        xlabel="block",
+        ylabel="image-token stream RMS, last step",
+        title="stream through depth",
+    )
+    steps.set(
+        yscale="log", xlabel="step", ylabel="largest image-token value", title="peak over training"
+    )
+    for ax in (blocks, steps):
+        log_axis(ax.yaxis, dense=True)
+        better(ax, "down")
+    steps.xaxis.set_major_formatter(FuncFormatter(plain))
+    fig.top_legend = fig.legend(handles=handles, loc="outside upper center", ncol=2, frameon=False)
+    headline(fig, "Where the stream grows: JiT-B/16 on Flowers-102, lr 1e-3, fp16")
+    footnote(fig, "loss: best held-out velocity loss so far")
+    save(fig, "final_norm")
+
+
 def main() -> None:
     figures = {
         "a": figure_a,
@@ -518,6 +585,7 @@ def main() -> None:
         "pareto": figure_pareto,
         "pareto_setups": lambda: figure_pareto("setups"),
         "jit": figure_jit,
+        "final_norm": figure_final_norm,
     }
     for name, make in figures.items():
         if ONLY in ("", name):

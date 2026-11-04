@@ -13,7 +13,8 @@ so the model has no gates, no modulation and no zero-initialized layer.
 | `matrices` | `stock` | `suggest(level="matrices")`: unit rows and a channel gain on every layer |
 | `arch` | norms without affine, QK-norm with a gain on q only | `suggest(level="absorb")` and |
 | | | `absorb_plan`; without the final norm, every input enters through a norm without affine, |
-| | | and the layers right before those norms and the output layer have unit rows, no gain |
+| | | the layers right before those norms and the output layer have unit rows and no gain, and |
+| | | the conditioning and in-context tokens are read-only (attended to, never written) |
 """
 
 import dataclasses
@@ -142,8 +143,16 @@ def modulate(x, shift, scale):
 class Block(nn.Module):
     """A pre-norm attention and SwiGLU block; with `adaln`, adaLN-Zero modulation and gates."""
 
-    def __init__(self, shape: Shape, affine: bool, qk_affine: tuple[bool, bool], adaln: bool):
+    def __init__(
+        self,
+        shape: Shape,
+        affine: bool,
+        qk_affine: tuple[bool, bool],
+        adaln: bool,
+        read_only_prefix: bool = False,
+    ):
         super().__init__()
+        self.read_only_prefix = read_only_prefix
         self.norm1 = nn.RMSNorm(shape.dim, eps=1e-6, elementwise_affine=affine)
         self.attn = Attention(shape, qk_affine)
         self.norm2 = nn.RMSNorm(shape.dim, eps=1e-6, elementwise_affine=affine)
@@ -157,8 +166,15 @@ class Block(nn.Module):
         if self.modulation is None:
             m = {}
             attn = self.attn(self.norm1(x), cos, sin, stats)
+            if self.read_only_prefix and self.prefix:
+                # Prefix tokens are read (keys and values) but receive no writes
+                attn = torch.cat(
+                    [torch.zeros_like(attn[:, : self.prefix]), attn[:, self.prefix :]], 1
+                )
             x = x + attn
             mlp = self.mlp(self.norm2(x))
+            if self.read_only_prefix and self.prefix:
+                mlp = torch.cat([torch.zeros_like(mlp[:, : self.prefix]), mlp[:, self.prefix :]], 1)
             x = x + mlp
         else:
             m = self.modulation(c)
@@ -194,7 +210,8 @@ class JiT(nn.Module):
     the image tokens from block 0, and nothing is zero-initialized. `final_norm` False lets the
     output layer read the residual stream directly. `input_norm` puts every entry into the stream
     (the image tokens, the conditioning token, the in-context tokens) through a norm without affine,
-    so each enters at a fixed scale; the layers right before those norms then carry no bias."""
+    so each enters at a fixed scale; the layers right before those norms then carry no bias, and
+    the prefix tokens are read-only: blocks attend to them but write only into the image tokens."""
 
     def __init__(
         self,
@@ -225,7 +242,8 @@ class JiT(nn.Module):
             self.register_buffer(f"{name}_cos", cos, persistent=False)
             self.register_buffer(f"{name}_sin", sin, persistent=False)
         self.blocks = nn.ModuleList(
-            Block(shape, affine, qk_affine, adaln) for _ in range(shape.depth)
+            Block(shape, affine, qk_affine, adaln, read_only_prefix=input_norm)
+            for _ in range(shape.depth)
         )
         self.norm = nn.RMSNorm(dim, eps=1e-6, elementwise_affine=affine) if final_norm else None
         self.input_norm = (
