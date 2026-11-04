@@ -233,7 +233,15 @@ result matches fp64 to about 1e-7.
 
 ![Unit-row forward + backward effective bandwidth per backend on three weight shapes, on a V100, RTX 2080 Ti, 3090 and 4090](docs/assets/kernels.png)
 
-Small layers are bound by launch time, about 0.06 ms per call on an RTX 4090. In eager mode a
+A unit-row Linear against a plain `nn.Linear`, forward + backward with the matmul, fp32 weights
+under fp16 autocast: 96% of the plain layer's speed on a 4096 -> 11008 layer and 99% on 768 ->
+2048, with Triton or `torch.compile`; eager reaches 87% and 96%.
+
+![Unit-row Linear speed as a share of the plain Linear's, per backend, on three layer shapes, on an RTX 2080 Ti, 3090 and 4090](docs/assets/layer_speed.png)
+
+On a 256 -> 768 layer the unit-row launches are a visible share of a 1 ms step where the matmul
+finishes faster than the host launches (73% on the 3090), and hidden where it does not (98% on
+the 2080 Ti). Small layers are bound by launch time, about 0.06 ms per call on an RTX 4090. In eager mode a
 forward pre-hook computes the weights of every eligible layer in one autograd node and a few
 launches (`ds.apply(..., group=True)`, the default); under `torch.compile` the op is traced as
 plain torch ops and fused. Whole training step of the byte-level LM (8 blocks, dim 256, batch
@@ -255,7 +263,8 @@ compile fuses them. Peak memory under compile: 1.44 GB stock, 1.43 GB matrices, 
 | `eager` | always | the reference, fp32 accumulation, fp64 kept |
 
 `ds.apply(model, plan, backend=...)` pins one; by default the fastest available is used.
-Benchmark: `kogine run measure/ops/speed.py`.
+Benchmarks: `kogine run measure/ops/speed.py` (the op), `kogine run measure/ops/overhead.py`
+(a layer against the plain layer).
 
 ## Measured
 

@@ -597,7 +597,8 @@ KERNEL_SHAPES = (  # (benchmark case, panel title: the weight shape only)
     ("JiT gate/up 2048x768", "weight 2048 x 768"),
     ("LM up 11008x4096", "weight 11008 x 4096"),
 )
-GPU_NAMES = {"Tesla_V100-SXM2-16GB": "V100", "NVIDIA_GeForce_RTX_2080_Ti": "2080 Ti",
+GPU_NAMES = {"Tesla_V100-SXM2-16GB": "V100", "Tesla_PG503-216": "V100",
+             "NVIDIA_GeForce_RTX_2080_Ti": "2080 Ti",
              "NVIDIA_GeForce_RTX_3090": "3090", "NVIDIA_GeForce_RTX_4090": "4090"}  # fmt: skip
 
 
@@ -650,6 +651,59 @@ def figure_kernels() -> None:
         "bound by launch time; the grouped launch covers them",
     )
     save(fig, "kernels")
+
+
+LAYER_CASES = (  # (overhead case, panel title)
+    ("linear 256->768, 16384 tokens", "Linear 256 -> 768, 16k tokens"),
+    ("linear 768->2048, 16384 tokens", "Linear 768 -> 2048, 16k tokens"),
+    ("linear 4096->11008, 8192 tokens", "Linear 4096 -> 11008, 8k tokens"),
+)
+
+
+def figure_layer_speed() -> None:
+    """A unit-row Linear's forward + backward speed relative to the plain Linear (fp32 weights,
+    fp16 autocast), one panel per shape, one group of bars per GPU."""
+    files = sorted((RUNS / "overhead").glob("*-fp16.jsonl"))
+    if not files:
+        return
+    by_gpu = {}
+    for path in files:
+        gpu = GPU_NAMES.get(path.stem.removesuffix("-fp16"), path.stem)
+        rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+        by_gpu[gpu] = {(r["case"], r["backend"]): r for r in rows}
+    gpus = [g for g in ("V100", "2080 Ti", "3090", "4090") if g in by_gpu]
+    fig, axes = figure(len(LAYER_CASES), width=15)
+    width = 0.8 / len(KERNEL_BACKENDS)
+    for ax, (case, title) in zip(axes, LAYER_CASES, strict=True):
+        for g, gpu in enumerate(gpus):
+            for i, (backend, color) in enumerate(KERNEL_BACKENDS.items()):
+                r = by_gpu[gpu].get((case, backend))
+                if r is None:
+                    continue
+                x = g + (i - 1) * width
+                ax.bar(x, 100 * r["relative_speed"], width, color=color)
+                ax.text(x, 100 * r["relative_speed"], f"{100 * r['relative_speed']:.0f}",
+                        ha="center", va="bottom", fontsize=7)  # fmt: skip
+        ax.axhline(100, color="0.35", ls="--", lw=1)
+        ax.set_xticks(range(len(gpus)))
+        ax.set_xticklabels(gpus)
+        ax.set(ylim=(0, 115), ylabel="speed of the plain Linear, %", title=title)
+        ax.grid(axis="x", visible=False)
+        better(ax, "up")
+    handles = [Line2D([], [], color=c, lw=6, label=b) for b, c in KERNEL_BACKENDS.items()]
+    handles.append(Line2D([], [], color="0.35", ls="--", lw=1, label="plain Linear"))
+    fig.top_legend = fig.legend(
+        handles=handles, loc="outside upper center", ncol=len(handles), frameon=False
+    )
+    headline(
+        fig, "Unit-row Linear against plain Linear: forward + backward, fp32 weights, fp16 autocast"
+    )
+    footnote(
+        fig,
+        "one layer on its own; in a whole model the grouped launch computes every layer's weight "
+        "in a few launches",
+    )
+    save(fig, "layer_speed")
 
 
 # ---- teaser ----
@@ -901,6 +955,7 @@ def main() -> None:
         "jit": figure_jit,
         "final_norm": figure_final_norm,
         "kernels": figure_kernels,
+        "layer_speed": figure_layer_speed,
         "teaser": figure_teaser,
     }
     for name, make in figures.items():

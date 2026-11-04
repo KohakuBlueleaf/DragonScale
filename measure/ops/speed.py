@@ -24,7 +24,7 @@ from dragonscale.spec import defaults
 from dragonscale_kernels import available, ops, resolve
 from dragonscale_kernels.registry import load_backends
 
-DEVICE = "cuda"
+DEVICE = "cuda:0"
 DTYPE = "fp32"  # "fp32" | "bf16" | "fp16"
 ROUNDS = 200
 WARMUP = 20
