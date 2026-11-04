@@ -8,6 +8,7 @@ RTX 3090, GPU 4. Drives measure/jit/train.py.
 DEVICE = "cuda:4"
 EXPERIMENT = "jit_tokens"
 PRESET = "arch"
+FINAL_NORM = False  # input norms, read-only context tokens, no final norm
 PRECISION = "fp16"
 STEPS = 10_000
 BATCH = 64  # 128 does not fit a 24 GB card in eager mode
