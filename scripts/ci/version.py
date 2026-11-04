@@ -1,21 +1,24 @@
-"""Read, stamp and bump the version: `[project] version` in pyproject.toml is the only source.
+"""Read, stamp and bump the version. `[project] version` in pyproject.toml is the only source;
+`write` also stamps `dragonscale.__version__`.
 
-kogine run scripts/ci/version.py                                  # read
-kogine run scripts/ci/version.py --set ACTION=nightly             # X.Y.(Z+1).devYYYYmmddHHMMSS
-kogine run scripts/ci/version.py --set ACTION=bump --set VALUE=minor  # patch | minor | major
-kogine run scripts/ci/version.py --set ACTION=write --set VALUE=<version>
+Usage:
+    python scripts/ci/version.py read
+    python scripts/ci/version.py nightly            # X.Y.(Z+1).devYYYYmmddHHMMSS
+    python scripts/ci/version.py bump patch|minor|major
+    python scripts/ci/version.py write <version>
 """
 
+import argparse
 import re
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
-ACTION = "read"  # "read" | "nightly" | "bump" | "write"
-VALUE = ""  # bump: "patch" | "minor" | "major"; write: the version
-
-PYPROJECT = Path(__file__).resolve().parents[2] / "pyproject.toml"
+ROOT = Path(__file__).resolve().parents[2]
+PYPROJECT = ROOT / "pyproject.toml"
+SRC_INIT = ROOT / "src" / "dragonscale" / "__init__.py"
+# Anchored to the start of a line, so a dependency pin containing "version = " cannot match
 PATTERN = re.compile(r'(?m)^(version\s*=\s*")([^"]+)(")')
-SRC_INIT = Path(__file__).resolve().parents[2] / "src" / "dragonscale" / "__init__.py"
 INIT_PATTERN = re.compile(r'(?m)^(__version__\s*=\s*")([^"]+)(")')
 
 
@@ -27,7 +30,6 @@ def read() -> str:
 
 
 def write(version: str) -> None:
-    """Stamp `version` into pyproject.toml and `dragonscale.__version__`."""
     for path, pattern in ((PYPROJECT, PATTERN), (SRC_INIT, INIT_PATTERN)):
         text, count = pattern.subn(rf"\g<1>{version}\g<3>", path.read_text(encoding="utf-8"), 1)
         if count != 1:
@@ -35,7 +37,7 @@ def write(version: str) -> None:
         path.write_text(text, encoding="utf-8")
 
 
-def parts(version: str) -> tuple[int, int, int]:
+def base(version: str) -> tuple[int, int, int]:
     core = re.match(r"^(\d+)\.(\d+)\.(\d+)", version)
     if not core:
         raise SystemExit(f"cannot parse version {version!r}")
@@ -44,39 +46,43 @@ def parts(version: str) -> tuple[int, int, int]:
 
 
 def bump(version: str, part: str) -> str:
-    major, minor, patch = parts(version)
-    match part:
-        case "major":
-            return f"{major + 1}.0.0"
-        case "minor":
-            return f"{major}.{minor + 1}.0"
-        case _:
-            return f"{major}.{minor}.{patch + 1}"
+    major, minor, patch = base(version)
+    if part == "major":
+        return f"{major + 1}.0.0"
+    if part == "minor":
+        return f"{major}.{minor + 1}.0"
+    return f"{major}.{minor}.{patch + 1}"
 
 
 def nightly(version: str) -> str:
-    major, minor, patch = parts(version)
+    """The PEP 440 dev release of the next patch: X.Y.(Z+1).devYYYYmmddHHMMSS, no local segment,
+    so PyPI accepts it and `pip install --pre` finds it."""
+    major, minor, patch = base(version)
     stamp = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
     return f"{major}.{minor}.{patch + 1}.dev{stamp}"
 
 
-def main() -> None:
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("action", choices=("read", "nightly", "bump", "write"))
+    parser.add_argument("value", nargs="?")
+    args = parser.parse_args()
     current = read()
-    match ACTION:
-        case "read":
-            print(current)
-        case "nightly":
-            print(nightly(current))
-        case "bump":
-            print(bump(current, VALUE or "patch"))
-        case "write":
-            if not VALUE:
-                raise SystemExit("write needs VALUE")
-            write(VALUE)
-            print(VALUE)
-        case _:
-            raise SystemExit(f"ACTION {ACTION!r} not in read / nightly / bump / write")
+    if args.action == "read":
+        print(current)
+    elif args.action == "nightly":
+        print(nightly(current))
+    elif args.action == "bump":
+        if args.value not in (None, "patch", "minor", "major"):
+            raise SystemExit(f"bump {args.value!r} not in patch / minor / major")
+        print(bump(current, args.value or "patch"))
+    else:
+        if not args.value:
+            raise SystemExit("write needs a version")
+        write(args.value)
+        print(args.value)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

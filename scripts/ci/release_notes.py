@@ -1,19 +1,20 @@
-"""Release notes of a version: its Change.md section, else the commits since the previous tag.
+"""Release notes of a version: its Change.md section (`## <date> update to <version>`), else the
+commits since the previous tag, so a release is never published with empty notes.
 
-kogine run scripts/ci/release_notes.py --set VERSION=0.1.0
+Usage:
+    python scripts/ci/release_notes.py --version 0.1.0
 """
 
+import argparse
 import re
 import subprocess
 from pathlib import Path
-
-VERSION = ""  # the version whose notes to print
 
 ROOT = Path(__file__).resolve().parents[2]
 CHANGELOG = ROOT / "Change.md"
 
 
-def section(version: str) -> str | None:
+def changelog_section(version: str) -> str | None:
     """The body under `## ... update to <version>`, up to the next `## ` heading."""
     if not CHANGELOG.exists():
         return None
@@ -22,22 +23,28 @@ def section(version: str) -> str | None:
     return match.group(1).strip() if match else None
 
 
-def commits() -> str:
-    """One line per commit since the previous tag."""
-    run = lambda *cmd: subprocess.run(  # noqa: E731
-        cmd, capture_output=True, text=True, check=False, cwd=ROOT
+def git(*args: str) -> str:
+    return subprocess.run(
+        ["git", *args], capture_output=True, text=True, check=False, cwd=ROOT
     ).stdout
-    tags = run("git", "tag", "--sort=-creatordate").split()
+
+
+def commits_since_last_tag() -> str:
+    tags = git("tag", "--sort=-creatordate").split()
     span = f"{tags[1]}..HEAD" if len(tags) > 1 else "HEAD"
-    return run("git", "log", "--no-merges", "--pretty=* %s (%h)", span).strip() or "* No changes."
+    return git("log", "--no-merges", "--pretty=* %s (%h)", span).strip() or "* No changes."
 
 
-def main() -> None:
-    if not VERSION:
-        raise SystemExit("VERSION is needed")
-    body = section(VERSION) or f"### Changes\n\n{commits()}"
-    print(f"## DragonScale {VERSION}\n\n{body}")
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--version", required=True)
+    args = parser.parse_args()
+    body = changelog_section(args.version)
+    if body is None:
+        body = f"### Changes\n\n{commits_since_last_tag()}"
+    print(f"## DragonScale {args.version}\n\n{body}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
