@@ -3,7 +3,7 @@
 import triton  # noqa: F401
 
 from dragonscale_kernels import ops
-from dragonscale_kernels.backends.triton import rows
+from dragonscale_kernels.backends.triton import grouped, rows
 from dragonscale_kernels.constraints import requires
 from dragonscale_kernels.registry import register
 
@@ -15,6 +15,8 @@ IMPLS = {
     ops.PROJECT: rows.project,
     ops.RESCALE_ROWS: rows.rescale_rows_,
     ops.PROJECT_RESCALE_ROWS: rows.project_rescale_rows_,
+    ops.UNIT_ROWS_GROUPED: grouped.unit_rows_grouped,
+    ops.UNIT_ROWS_GROUPED_BWD: grouped.unit_rows_grouped_bwd,
 }
 
 for _op, _fn in IMPLS.items():

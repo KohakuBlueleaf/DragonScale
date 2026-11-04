@@ -7,6 +7,7 @@ from torch import Tensor, nn
 
 from dragonscale.functional.rows import row_norms
 from dragonscale.layer_types import LAYER_TYPES
+from dragonscale.patch import grouped
 from dragonscale.patch import state as formats
 from dragonscale.patch.patched import PatchedLayer
 from dragonscale.plan.build import make_plan
@@ -50,9 +51,13 @@ def warn_changed_output(model: nn.Module, plan: Plan) -> None:
 
 
 class Session:
-    """Applies `plan` to `model` on construction; `remove` or `bake` ends it."""
+    """Applies `plan` to `model` on construction; `remove` or `bake` ends it. With `group`, every
+    forward of `model` computes the eligible layers' weights together (`dragonscale.patch.grouped`).
+    """
 
-    def __init__(self, model: nn.Module, plan: Plan, backend: str | None = None):
+    def __init__(
+        self, model: nn.Module, plan: Plan, backend: str | None = None, group: bool = True
+    ):
         raise_problems(validate(model, plan))
         warn_changed_output(model, plan)
         self.plan = plan
@@ -71,6 +76,8 @@ class Session:
                 continue
             patched.install()
             self.patched.append(patched)
+        if group:
+            grouped.attach(model)
 
     @classmethod
     def from_model(cls, model: nn.Module) -> "Session":
@@ -151,6 +158,7 @@ class Session:
             p.uninstall()
         for p, weight in weights:
             getattr(p.module, p.layer_type.weight).data.copy_(weight)
+        grouped.detach(self.model)
         self.closed = True
 
     def canonicalize(self) -> None:
@@ -160,6 +168,7 @@ class Session:
         raise_problems(formats.native_errors(self.patched))
         for p in reversed(self.patched):
             p.canonicalize()
+        grouped.detach(self.model)
         self.closed = True
 
     def remove(self) -> None:
@@ -167,6 +176,7 @@ class Session:
         self._check_open()
         for p in reversed(self.patched):
             p.uninstall()
+        grouped.detach(self.model)
         self.closed = True
 
     def describe(self) -> str:
@@ -174,9 +184,12 @@ class Session:
 
 
 def apply(
-    model: nn.Module, plan: Plan | Sequence[Rule] | str, backend: str | None = None
+    model: nn.Module,
+    plan: Plan | Sequence[Rule] | str,
+    backend: str | None = None,
+    group: bool = True,
 ) -> Session:
-    """Apply a plan, rule list or preset name to `model`."""
+    """Apply a plan, rule list or preset name to `model`; `group` as in `Session`."""
     if not isinstance(plan, Plan):
         plan = make_plan(model, plan)
-    return Session(model, plan, backend)
+    return Session(model, plan, backend, group)

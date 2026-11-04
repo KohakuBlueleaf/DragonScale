@@ -131,3 +131,57 @@ def test_canonicalize(name, rules):
     assert model.state_dict().keys() == native.keys()
     assert all(torch.equal(model.state_dict()[k], v) for k, v in native.items())
     assert torch.allclose(model(x), patched, rtol=1e-10, atol=1e-12)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="grouped unit rows run on CUDA")
+def test_grouped_matches_per_layer():
+    """The grouped forward gives the per-layer output and gradients, over two accumulating
+    backward passes; remove drops its hooks."""
+    torch.manual_seed(0)
+    model = LM().float().cuda()
+    session = ds.apply(model, "unit_gain")
+    plain = copy.deepcopy(model)
+    ds.patch.grouped.detach(plain)
+    x = tokens().cuda()
+    for m in (model, plain):
+        for _ in range(2):
+            m(x).pow(2).mean().backward()
+    torch.testing.assert_close(model(x), plain(x), rtol=1e-5, atol=1e-6)
+    for a, b in zip(model.parameters(), plain.parameters(), strict=True):
+        torch.testing.assert_close(a.grad, b.grad, rtol=1e-4, atol=1e-6)
+    session.remove()
+    assert not model._forward_pre_hooks and not model._forward_hooks
+
+
+class _Checkpointed(nn.Module):
+    def __init__(self, reentrant: bool | None):
+        super().__init__()
+        self.blocks = nn.ModuleList(nn.Linear(16, 16) for _ in range(3))
+        self.unused = nn.Linear(16, 16)
+        self.reentrant = reentrant
+
+    def forward(self, x):
+        for block in self.blocks:
+            if self.reentrant is None:
+                x = x + block(x)
+            else:
+                x = x + torch.utils.checkpoint.checkpoint(block, x, use_reentrant=self.reentrant)
+        return x
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="grouped unit rows run on CUDA")
+@pytest.mark.parametrize("reentrant", [None, True, False])
+def test_grouped_checkpoint_and_unused(reentrant):
+    """Under activation checkpointing the grouped model gives the per-layer gradients, and a layer
+    the forward does not use gets no gradient."""
+    torch.manual_seed(0)
+    model = _Checkpointed(reentrant).cuda()
+    ds.apply(model, "unit_gain")
+    plain = copy.deepcopy(model)
+    ds.patch.grouped.detach(plain)
+    x = torch.randn(4, 16, device="cuda", requires_grad=True)
+    for m in (model, plain):
+        m(x).pow(2).mean().backward()
+    assert model.unused.weight.grad is None and model.unused.gain.grad is None
+    for a, b in zip(model.blocks.parameters(), plain.blocks.parameters(), strict=True):
+        torch.testing.assert_close(a.grad, b.grad, rtol=1e-4, atol=1e-6)

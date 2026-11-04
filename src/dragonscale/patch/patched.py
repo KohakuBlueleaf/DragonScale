@@ -18,6 +18,7 @@ from dragonscale.functional.rows import (
 )
 from dragonscale.layer_types import LAYER_TYPES, LayerType
 from dragonscale.nn.layers import WEIGHT_FNS
+from dragonscale.patch import grouped
 from dragonscale.patch.forwards import eval_forward, method_forward
 from dragonscale.plan.layer_plan import LayerPlan
 from dragonscale.plan.validate import MARKER
@@ -102,6 +103,7 @@ class PatchedLayer:
         self._gain: nn.Parameter | None = None
         self._filled: tuple[Tensor, int] | None = None
         self._cache: tuple[tuple, Tensor] | None = None
+        self.stash: tuple | None = None  # set by dragonscale.patch.grouped for one forward
 
     def __reduce__(self):
         """Copies and pickles rebuild around the copied module; kernel ops are not kept."""
@@ -156,6 +158,17 @@ class PatchedLayer:
         """The weight the layer computes with, from a raw weight and a gain, per method."""
         if self.plan.method == "rescale":
             return gain_scaled(raw, self.plan.spec, gain)
+        if not torch.compiler.is_compiling():
+            stash = self.stash
+            if (
+                stash is not None
+                and stash[0] is raw
+                and stash[1] == raw._version
+                and stash[2] is gain
+                and (gain is None or stash[3] == gain._version)
+                and grouped.plain_autograd()
+            ):
+                return stash[4]
         if torch.compiler.is_compiling():
             spec, shape = self.plan.spec, raw.shape
             if gain is not None and gain.numel() != spec.rows(shape):

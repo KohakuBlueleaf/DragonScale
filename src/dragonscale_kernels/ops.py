@@ -40,6 +40,11 @@ rescale_rows_(w, view, row_dims, radius) -> norms[rows]
 
 project_rescale_rows_(w, moments: list, view, row_dims, radius) -> norms[rows]
     in place: every tensor in `moments` projected tangent to w's rows, then `rescale_rows_(w)`.
+
+unit_rows_grouped(ws: list, gains: list, radii: list) -> (outs: list, norms: list)
+    `unit_rows` of every contiguous `[rows, cols]` weight in `ws` (rows first), in few launches.
+unit_rows_grouped_bwd(grads, ws, norms, gains, radii) -> (grad_ws: list, grad_gains: list)
+    `unit_rows_bwd` of each; a grad_gain is None where its gain is None.
 """
 
 ROW_NORM = "row_norm"
@@ -53,6 +58,8 @@ IN_SCALE_BWD = "in_scale_bwd"
 PROJECT = "project"
 RESCALE_ROWS = "rescale_rows_"
 PROJECT_RESCALE_ROWS = "project_rescale_rows_"
+UNIT_ROWS_GROUPED = "unit_rows_grouped"
+UNIT_ROWS_GROUPED_BWD = "unit_rows_grouped_bwd"
 
 OPS = (
     ROW_NORM,
@@ -66,5 +73,7 @@ OPS = (
     PROJECT,
     RESCALE_ROWS,
     PROJECT_RESCALE_ROWS,
+    UNIT_ROWS_GROUPED,
+    UNIT_ROWS_GROUPED_BWD,
 )
 FLOOR = 1e-12
