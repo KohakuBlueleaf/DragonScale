@@ -2,11 +2,11 @@
 README tables printed as Markdown.
 
     kogine run measure/plots.py
-    kogine run measure/plots.py --set ONLY=a
+    kogine run measure/plots.py --set ONLY=pareto
 
 A run `failed` when it diverged (its output says so, or its held-out loss is not finite at the
-end) or its final held-out loss is above `FAILED_LOSS`: runs that train end near 0.9 to 1.2, runs
-whose stream blew up stall near 2.4. Failed runs are drawn at the top of the axis with an x.
+end) or its best held-out loss stayed above `FAILED_LOSS`: runs that train reach 0.9 to 1.2, runs
+whose stream blew up stall near 2.4. Failed runs are drawn as an x in the strip above a panel.
 """
 
 import json
@@ -19,13 +19,33 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from common import RUNS, figure_path
+from matplotlib.lines import Line2D
+from matplotlib.ticker import FuncFormatter, LogLocator, NullFormatter
 
-ONLY = ""  # "" = every figure; otherwise one of a b c d e jit
-FAILED_LOSS = 2.0  # byte LM: a final held-out loss above this is a failed run
-DPI = 150
+ONLY = ""  # "" = every figure; otherwise one of a b depth width d pareto jit
+FAILED_LOSS = 2.0  # byte LM: a run whose best held-out loss stays above this failed
+DPI = 160
+HEIGHT = 4.4  # inches; every figure is one row of panels, wider than tall
 
 PRESETS = ("stock", "matrices", "arch")
-COLORS = {"stock": "#c0392b", "matrices": "#2980b9", "arch": "#27ae60"}
+COLORS = {"stock": "#D55E00", "matrices": "#0072B2", "arch": "#009E73"}  # Okabe-Ito
+PRECISION_STYLE = {"fp16": "-", "fp32": "--"}
+LR_STYLES = ("-", "--", ":")
+
+plt.rcParams.update(
+    {
+        "font.size": 9,
+        "axes.titlesize": 10,
+        "axes.titlepad": 18,
+        "axes.labelsize": 9,
+        "legend.fontsize": 8,
+        "axes.spines.top": False,
+        "axes.spines.right": False,
+        "axes.grid": True,
+        "grid.alpha": 0.25,
+        "figure.facecolor": "white",
+    }
+)
 
 
 # ---- reading ----
@@ -34,19 +54,19 @@ COLORS = {"stock": "#c0392b", "matrices": "#2980b9", "arch": "#27ae60"}
 def read_run(path: Path) -> dict:
     """The knobs, the log rows and the end state of one run."""
     rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
-    head = rows[0]
     logs = [r for r in rows if "held_loss" in r]
     done = rows[-1].get("done", "running")
     finite = [r["held_loss"] for r in logs if math.isfinite(r["held_loss"])]
     end = logs[-1]["held_loss"] if logs else math.nan
     diverged = done == "diverged" or not math.isfinite(end)
+    best = min(finite) if finite else math.nan
     return {
-        "failed": diverged or end > FAILED_LOSS,
-        "knobs": head.get("knobs", {}),
+        "knobs": rows[0].get("knobs", {}),
         "logs": logs,
         "done": done,
         "diverged": diverged,
-        "best": min(finite) if finite else math.nan,
+        "failed": diverged or not best < FAILED_LOSS,
+        "best": best,
         "final": end,
     }
 
@@ -55,43 +75,115 @@ def runs_of(experiment: str, group: str = "bytelm") -> list[dict]:
     return [read_run(p) for p in sorted((RUNS / group / experiment).glob("*.jsonl"))]
 
 
-def peak(run: dict, key: str) -> float:
-    """The largest finite value of `key` over the run; inf when it overflowed."""
-    values = [r[key] for r in run["logs"] if key in r and r[key] is not None]
+def peak(run: dict, key: str = "max/stream_max") -> float:
+    """The largest value of `key` over the run; inf when it overflowed."""
+    values = [r[key] for r in run["logs"] if r.get(key) is not None]
     if not values:
         return math.nan
     return math.inf if any(not math.isfinite(v) for v in values) else max(values)
 
 
-# ---- drawing ----
+def knob(run: dict, name: str):
+    return run["knobs"].get(name)
 
 
-def draw(ax, xs, ys, flags, preset, style="-", label=None, top=None):
-    """A line through the finite points; diverged or overflowed points as an x at `top`."""
-    finite = [
-        (x, y) for x, y, bad in zip(xs, ys, flags, strict=True) if not bad and math.isfinite(y)
-    ]
-    if finite:
+# ---- style ----
+
+
+def plain(value, _=None) -> str:
+    """1, 20, 300, 1024, 5k, 50k, 6M: k and M only for whole thousands and millions."""
+    for size, suffix in ((1e6, "M"), (1e3, "k")):
+        if abs(value) >= size and value % size == 0:
+            return f"{value / size:g}{suffix}"
+    return f"{value:g}"
+
+
+def log_axis(axis, dense: bool = False) -> None:
+    """Plain labels on a log axis; `dense` adds 2 and 5 between the powers of ten."""
+    axis.set_major_locator(LogLocator(base=10, subs=(1, 2, 5) if dense else (1,)))
+    axis.set_major_formatter(FuncFormatter(plain))
+    axis.set_minor_formatter(NullFormatter())
+
+
+def better(ax, direction: str) -> None:
+    """Mark the way better values lie: "down" on the y axis, "down-left" on both. The arrow goes
+    into the axis label when the figure is saved, so it never covers data."""
+    ax.better = direction
+
+
+def label_better(ax) -> None:
+    """Append the arrow to the axis labels; the y label is rotated, so its arrow points down."""
+    direction = getattr(ax, "better", None)
+    if direction is None:
+        return
+    ax.set_ylabel(f"{ax.get_ylabel()}   \u2190 better")
+    if direction == "down-left":
+        ax.set_xlabel(f"\u2190 better   {ax.get_xlabel()}")
+
+
+def failed_strip(ax, xs: list, presets: list) -> None:
+    """Failed runs as x marks in a strip just above the panel."""
+    for x, preset in zip(xs, presets, strict=True):
         ax.plot(
-            *zip(*finite, strict=True), style, color=COLORS[preset], marker="o", ms=4, label=label
+            x,
+            1.04,
+            "x",
+            color=COLORS[preset],
+            ms=7,
+            mew=2,
+            transform=ax.get_xaxis_transform(),
+            clip_on=False,
         )
-    bad = [x for x, y, f in zip(xs, ys, flags, strict=True) if f or not math.isfinite(y)]
-    if bad and top is not None:
-        ax.plot(bad, [top] * len(bad), "x", color=COLORS[preset], ms=8, mew=2)
+
+
+def figure(panels: int, width: float):
+    fig, axes = plt.subplots(1, panels, figsize=(width, HEIGHT), layout="constrained")
+    return fig, list(axes) if panels > 1 else [axes]
+
+
+def legend_handles(extra: list | None = None) -> list:
+    return [Line2D([], [], color=COLORS[p], lw=2, label=p) for p in PRESETS] + (extra or [])
+
+
+def preset_legend(ax, extra: list | None = None, **kwargs) -> None:
+    ax.legend(handles=legend_handles(extra), frameon=False, **kwargs)
+
+
+def top_legend(fig, extra: list | None = None) -> None:
+    """One legend for the whole figure, in a row above the panels."""
+    handles = legend_handles(extra)
+    fig.legend(
+        handles=handles,
+        loc="outside upper center",
+        ncol=len(handles),
+        frameon=False,
+    )
+
+
+def footnote(fig, text: str) -> None:
+    fig.text(0.5, -0.04, text, ha="center", fontsize=8, color="0.35")
 
 
 def save(fig, name: str) -> None:
+    for ax in fig.axes:
+        label_better(ax)
     path = figure_path(name)
     fig.savefig(path, dpi=DPI, bbox_inches="tight")
     plt.close(fig)
     print(f"wrote {path}")
 
 
-def by(runs: list[dict], *keys: str) -> dict:
-    out = defaultdict(list)
-    for run in runs:
-        out[tuple(run["knobs"].get(k) for k in keys)].append(run)
-    return out
+def line(ax, runs: list[dict], x_of, y_of, style="-") -> None:
+    """One preset's runs as a line over x; failed runs in the strip."""
+    if not runs:
+        return
+    runs = sorted(runs, key=x_of)
+    ok = [(x_of(r), y_of(r)) for r in runs if not r["failed"] and math.isfinite(y_of(r))]
+    preset = knob(runs[0], "PRESET")
+    if ok:
+        ax.plot(*zip(*ok, strict=True), style, color=COLORS[preset], marker="o", ms=3.5, lw=1.6)
+    bad = [r for r in runs if r["failed"]]
+    failed_strip(ax, [x_of(r) for r in bad], [knob(r, "PRESET") for r in bad])
 
 
 # ---- A: learning rate x precision ----
@@ -99,25 +191,27 @@ def by(runs: list[dict], *keys: str) -> dict:
 
 def figure_a() -> None:
     runs = runs_of("a_lr_precision")
-    groups = by(runs, "PRESET", "PRECISION")
-    fig, (left, right) = plt.subplots(1, 2, figsize=(11, 4))
-    for (preset, precision), group in sorted(groups.items()):
-        group.sort(key=lambda r: r["knobs"]["LR"])
-        lrs = [r["knobs"]["LR"] for r in group]
-        flags = [r["failed"] for r in group]
-        style = "-" if precision == "fp16" else "--"
-        label = f"{preset} {precision}"
-        draw(left, lrs, [r["best"] for r in group], flags, preset, style, label, top=2.6)
-        stream = [peak(r, "max/stream_max") for r in group]
-        draw(right, lrs, stream, flags, preset, style, label, top=3e8)
-    left.set(xscale="log", xlabel="learning rate", ylabel="best held-out loss (nats per byte)")
-    left.set_ylim(0.9, 2.7)
-    right.set(xscale="log", yscale="log", xlabel="learning rate", ylabel="peak residual-stream |x|")
-    left.set_title("held-out loss (x: failed)")
-    right.set_title("peak residual stream over training")
-    left.legend(fontsize=7, ncol=2)
-    for ax in (left, right):
-        ax.grid(alpha=0.3, which="both")
+    groups = defaultdict(list)
+    for run in runs:
+        groups[(knob(run, "PRESET"), knob(run, "PRECISION"))].append(run)
+    fig, (loss, stream) = figure(2, width=10.5)
+    for (_, precision), group in groups.items():
+        style = PRECISION_STYLE[precision]
+        line(loss, group, lambda r: knob(r, "LR"), lambda r: r["best"], style)
+        line(stream, group, lambda r: knob(r, "LR"), peak, style)
+    for ax in (loss, stream):
+        ax.set_xscale("log")
+        log_axis(ax.xaxis)
+        ax.set_xlabel("learning rate")
+        better(ax, "down")
+    loss.set(ylabel="best held-out loss (nats / byte)", title="loss vs learning rate")
+    stream.set_yscale("log")
+    log_axis(stream.yaxis)
+    stream.set(ylabel="peak residual stream |x|", title="stream vs learning rate")
+    loss.set_ylim(top=1.22)
+    styles = [Line2D([], [], color="0.3", ls=s, label=p) for p, s in PRECISION_STYLE.items()]
+    top_legend(fig, styles)
+    footnote(fig, "x above a panel: the run failed (diverged, or never got below loss 2)")
     save(fig, "a_lr_precision")
 
     print("\n### A: learning rate x precision\n")
@@ -128,79 +222,86 @@ def figure_a() -> None:
     ):
         ok = [r for r in group if not r["failed"]]
         best = min(ok, key=lambda r: r["best"]) if ok else None
-        largest = max((r["knobs"]["LR"] for r in ok), default=None)
-        cell = f"{best['best']:.3f} ({best['knobs']['LR']:g})" if best else "-"
+        largest = max((knob(r, "LR") for r in ok), default=None)
+        cell = f"{best['best']:.3f} ({knob(best, 'LR'):g})" if best else "-"
         print(f"| {preset} | {precision} | {cell} | {largest:g} |")
 
 
 # ---- B: growth over time ----
 
 
-def figure_b() -> None:
-    runs = runs_of("b_long")
-    fig, (left, right) = plt.subplots(1, 2, figsize=(11, 4))
-    for run in sorted(runs, key=lambda r: (r["knobs"]["LR"], PRESETS.index(r["knobs"]["PRESET"]))):
-        preset, lr = run["knobs"]["PRESET"], run["knobs"]["LR"]
-        steps = [r["step"] for r in run["logs"] if r["step"] > 0]
-        rows = [r for r in run["logs"] if r["step"] > 0]
-        style = "-" if lr < 5e-3 else "--"
-        label = f"{preset} lr {lr:g}" + (" (failed)" if run["failed"] else "")
-        left.plot(
-            steps, [r["max/stream_max"] for r in rows], style, color=COLORS[preset], label=label
+def b_value(row: dict, key: str) -> float:
+    if key == "raw":
+        return max(
+            v for k, v in row.items() if k.startswith("blocks.") and k.endswith("/raw_norm_max")
         )
-        raw = [
-            max(v for k, v in r.items() if k.startswith("blocks.") and k.endswith("/raw_norm_max"))
-            for r in rows
-        ]
-        right.plot(steps, raw, style, color=COLORS[preset], label=label)
-    left.set(xscale="log", yscale="log", xlabel="step", ylabel="peak residual-stream |x|")
-    right.set(
-        xscale="log", yscale="log", xlabel="step", ylabel="largest raw row norm in the blocks"
+    if key == "gain":
+        gains = [v for k, v in row.items() if k.endswith((".out/gain_max", ".down/gain_max"))]
+        return max(gains) if gains else math.nan
+    return row[key]
+
+
+def figure_b() -> None:
+    runs = sorted(runs_of("b_long"), key=lambda r: knob(r, "LR"))
+    lrs = sorted({knob(r, "LR") for r in runs})
+    metrics = (
+        ("max/stream_max", "peak residual stream |x|", "residual stream"),
+        ("raw", "largest raw row length (blocks)", "raw weight rows"),
+        ("gain", "largest writer gain (out, down)", "learned gains"),
     )
-    left.set_title("residual stream over 100k steps")
-    right.set_title("raw weight rows over 100k steps")
-    left.legend(fontsize=7)
-    for ax in (left, right):
-        ax.grid(alpha=0.3, which="both")
+    fig, axes = figure(3, width=13)
+    for run in runs:
+        preset, lr = knob(run, "PRESET"), knob(run, "LR")
+        rows = [r for r in run["logs"] if r["step"] > 0]
+        for ax, (key, _, _) in zip(axes, metrics, strict=True):
+            ys = [b_value(r, key) for r in rows]
+            if not any(math.isfinite(y) for y in ys):
+                continue
+            style = LR_STYLES[lrs.index(lr)]
+            ax.plot([r["step"] for r in rows], ys, style, color=COLORS[preset], lw=1.4)
+    for ax, (_, label, title) in zip(axes, metrics, strict=True):
+        ax.set(xscale="log", yscale="log", xlabel="step", ylabel=label, title=title)
+        log_axis(ax.xaxis)
+        log_axis(ax.yaxis)
+    better(axes[0], "down")
+    styles = [
+        Line2D([], [], color="0.3", ls=LR_STYLES[i], label=f"lr {lr:g}") for i, lr in enumerate(lrs)
+    ]
+    top_legend(fig, styles)
+    footnote(
+        fig,
+        "100k steps, fp16; stock at lr 0.01 diverged near step 1k. Raw rows: stock's weights are "
+        "what the layer uses; the patched models' raw rows do not reach the output",
+    )
     save(fig, "b_long")
 
 
-# ---- C / E: depth and width ----
+# ---- depth and width ----
 
 
-def sweep_figure(experiment: str, knob: str, label: str, name: str) -> None:
+def figure_sweep(experiment: str, name: str, label: str) -> None:
+    """Peak stream over depth or width, one panel per learning rate (2e-3, 1e-2)."""
     runs = runs_of(experiment)
-    lrs = sorted({r["knobs"]["LR"] for r in runs})
-    fig, axes = plt.subplots(1, len(lrs), figsize=(4 * len(lrs), 3.6), sharey=True)
-    for ax, lr in zip(axes, lrs, strict=True):
+    values = sorted({knob(r, name) for r in runs})
+    fig, axes = figure(2, width=9.5)
+    for ax, lr in zip(axes, (2e-3, 1e-2), strict=True):
         for preset in PRESETS:
-            group = sorted(
-                (r for r in runs if r["knobs"]["PRESET"] == preset and r["knobs"]["LR"] == lr),
-                key=lambda r: r["knobs"][knob],
-            )
-            xs = [r["knobs"][knob] for r in group]
-            draw(
-                ax,
-                xs,
-                [peak(r, "max/stream_max") for r in group],
-                [r["failed"] for r in group],
-                preset,
-                "-",
-                preset,
-                top=3e5,
-            )
+            group = [r for r in runs if knob(r, "PRESET") == preset and knob(r, "LR") == lr]
+            line(ax, group, lambda r: knob(r, name), peak)
         ax.set(xscale="log", yscale="log", xlabel=label, title=f"lr {lr:g}")
-        ax.set_xticks(sorted({r["knobs"][knob] for r in runs}))
-        ax.xaxis.set_major_formatter(matplotlib.ticker.ScalarFormatter())
-        ax.xaxis.set_minor_formatter(matplotlib.ticker.NullFormatter())
-        ax.grid(alpha=0.3, which="both")
-    axes[0].set_ylabel("peak residual-stream |x| (x: failed)")
-    axes[0].legend(fontsize=8)
-    save(fig, name)
+        ax.set_xticks(values)
+        ax.xaxis.set_major_formatter(FuncFormatter(plain))
+        ax.xaxis.set_minor_formatter(NullFormatter())
+        log_axis(ax.yaxis, dense=True)
+        better(ax, "down")
+    axes[0].set_ylabel("peak residual stream |x|")
+    top_legend(fig)
+    footnote(fig, "5k steps, fp16; x above a panel: the run failed")
+    save(fig, experiment.split("_", 1)[1])
 
-    print(f"\n### {name}: best held-out loss (x = failed)\n")
-    values = sorted({r["knobs"][knob] for r in runs})
-    print("| preset | lr | " + " | ".join(f"{knob.lower()} {v}" for v in values) + " |")
+    lrs = sorted({knob(r, "LR") for r in runs})
+    print(f"\n### {label}: best held-out loss (x = failed)\n")
+    print("| preset | lr | " + " | ".join(f"{label} {v}" for v in values) + " |")
     print("| --- | --- | " + " | ".join("---" for _ in values) + " |")
     for preset in PRESETS:
         for lr in lrs:
@@ -209,13 +310,12 @@ def sweep_figure(experiment: str, knob: str, label: str, name: str) -> None:
                 match = [
                     r
                     for r in runs
-                    if r["knobs"]["PRESET"] == preset
-                    and r["knobs"]["LR"] == lr
-                    and r["knobs"][knob] == v
+                    if knob(r, "PRESET") == preset and knob(r, "LR") == lr and knob(r, name) == v
                 ]
-                cells.append(
-                    "-" if not match else ("x" if match[0]["failed"] else f"{match[0]['best']:.3f}")
-                )
+                if not match:
+                    cells.append("-")
+                else:
+                    cells.append("x" if match[0]["failed"] else f"{match[0]['best']:.3f}")
             print(f"| {preset} | {lr:g} | " + " | ".join(cells) + " |")
 
 
@@ -224,60 +324,95 @@ def sweep_figure(experiment: str, knob: str, label: str, name: str) -> None:
 
 def table_d() -> None:
     runs = runs_of("d_weight_decay")
-    print("\n### D: weight decay on stock (best held-out loss, peak stream; x = diverged)\n")
-    lrs = sorted({r["knobs"]["LR"] for r in runs})
+    print("\n### D: weight decay on stock (best held-out loss, peak stream; x = failed)\n")
+    lrs = sorted({knob(r, "LR") for r in runs})
     print("| weight decay | " + " | ".join(f"lr {lr:g}" for lr in lrs) + " |")
     print("| --- | " + " | ".join("---" for _ in lrs) + " |")
-    for wd in sorted({r["knobs"]["WEIGHT_DECAY"] for r in runs}):
+    for wd in sorted({knob(r, "WEIGHT_DECAY") for r in runs}):
         cells = []
         for lr in lrs:
             run = next(
-                (r for r in runs if r["knobs"]["LR"] == lr and r["knobs"]["WEIGHT_DECAY"] == wd),
-                None,
+                (r for r in runs if knob(r, "LR") == lr and knob(r, "WEIGHT_DECAY") == wd), None
             )
             if run is None:
                 cells.append("-")
             elif run["failed"]:
                 cells.append("x")
             else:
-                cells.append(f"{run['best']:.3f}, {peak(run, 'max/stream_max'):.3g}")
+                cells.append(f"{run['best']:.3f}, {peak(run):.3g}")
         print(f"| {wd:g} | " + " | ".join(cells) + " |")
+
+
+# ---- stream vs loss ----
+
+
+def figure_pareto() -> None:
+    """Every 5k-step byte-LM run that trained: peak stream against final held-out loss."""
+    marks = {"fp16": "o", "fp32": "s", "wd": "^"}
+    fig, (ax,) = figure(1, width=7.5)
+    for experiment in ("a_lr_precision", "c_depth", "d_weight_decay", "e_width"):
+        for run in runs_of(experiment):
+            if run["failed"] or run["done"] != "finished" or not math.isfinite(peak(run)):
+                continue
+            kind = "wd" if knob(run, "WEIGHT_DECAY") else knob(run, "PRECISION")
+            ax.scatter(
+                peak(run),
+                run["final"],
+                s=22,
+                marker=marks[kind],
+                color=COLORS[knob(run, "PRESET")],
+                alpha=0.75,
+                edgecolors="none",
+            )
+    ax.set(
+        xscale="log",
+        xlabel="peak residual stream |x|",
+        ylabel="final held-out loss (nats / byte)",
+        title="every finished byte-LM run that trained (5k steps)",
+    )
+    log_axis(ax.xaxis)
+    better(ax, "down-left")
+    names = {"fp16": "fp16", "fp32": "fp32", "wd": "stock + weight decay"}
+    kinds = [Line2D([], [], color="0.3", marker=m, ls="", label=names[k]) for k, m in marks.items()]
+    preset_legend(ax, kinds, loc="upper left")
+    save(fig, "pareto")
 
 
 # ---- JiT ----
 
 
 def figure_jit() -> None:
-    runs = runs_of("jit_tokens", group="jit")
-    lrs = sorted({r["knobs"]["LR"] for r in runs})
-    keys = (
-        ("held_loss", "held-out velocity loss", "linear"),
-        ("max/stream_max", "peak residual-stream |x|", "log"),
-        ("max/logit_max", "largest attention logit", "log"),
+    runs = [r for r in runs_of("jit_tokens", group="jit") if knob(r, "PRECISION") == "fp16"]
+    lrs = sorted({knob(r, "LR") for r in runs})
+    metrics = (
+        ("held_loss", "held-out velocity loss", False),
+        ("max/stream_max", "peak residual stream |x|", True),
+        ("max/logit_max", "largest attention logit", False),
     )
-    fig, axes = plt.subplots(
-        len(keys), len(lrs), figsize=(4 * len(lrs), 3 * len(keys)), squeeze=False
-    )
-    for col, lr in enumerate(lrs):
-        for run in (r for r in runs if r["knobs"]["LR"] == lr):
-            preset, precision = run["knobs"]["PRESET"], run["knobs"]["PRECISION"]
-            rows = [r for r in run["logs"] if r["step"] > 0]
-            style = "-" if precision == "fp16" else "--"
-            for row, (key, _, _) in enumerate(keys):
-                axes[row][col].plot(
-                    [r["step"] for r in rows],
-                    [r.get(key, math.nan) for r in rows],
-                    style,
-                    color=COLORS[preset],
-                    label=f"{preset} {precision}",
-                )
-        axes[0][col].set_title(f"lr {lr:g}")
-        for row, (_, label, scale) in enumerate(keys):
-            axes[row][col].set(yscale=scale, xlabel="step")
-            axes[row][col].grid(alpha=0.3, which="both")
-            if col == 0:
-                axes[row][col].set_ylabel(label)
-    axes[0][0].legend(fontsize=7)
+    fig, axes = figure(3, width=13)
+    for run in runs:
+        preset, lr = knob(run, "PRESET"), knob(run, "LR")
+        rows = [r for r in run["logs"] if r["step"] > 0]
+        for ax, (key, _, _) in zip(axes, metrics, strict=True):
+            ax.plot(
+                [r["step"] for r in rows],
+                [r.get(key, math.nan) for r in rows],
+                LR_STYLES[lrs.index(lr)],
+                color=COLORS[preset],
+                lw=1.4,
+            )
+    for ax, (_, label, logy) in zip(axes, metrics, strict=True):
+        ax.set(xlabel="step", ylabel=label)
+        ax.xaxis.set_major_formatter(FuncFormatter(plain))
+        if logy:
+            ax.set_yscale("log")
+            log_axis(ax.yaxis, dense=True)
+        better(ax, "down")
+    styles = [
+        Line2D([], [], color="0.3", ls=LR_STYLES[i], label=f"lr {lr:g}") for i, lr in enumerate(lrs)
+    ]
+    top_legend(fig, styles)
+    footnote(fig, "JiT-B/16 on Flowers-102, 256 px, batch 64, fp16")
     save(fig, "jit")
 
 
@@ -285,9 +420,10 @@ def main() -> None:
     figures = {
         "a": figure_a,
         "b": figure_b,
-        "c": lambda: sweep_figure("c_depth", "DEPTH", "depth", "c_depth"),
+        "depth": lambda: figure_sweep("c_depth", "DEPTH", "depth"),
+        "width": lambda: figure_sweep("e_width", "DIM", "width"),
         "d": table_d,
-        "e": lambda: sweep_figure("e_width", "DIM", "width", "e_width"),
+        "pareto": figure_pareto,
         "jit": figure_jit,
     }
     for name, make in figures.items():
