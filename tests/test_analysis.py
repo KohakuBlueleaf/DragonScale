@@ -1,6 +1,7 @@
 """Analysis on a one-block stock pre-norm LM: the free pairs worked out by hand are found and are
-dangerous, the SiLU-pinned pair is not; suggest + apply leaves none dangerous; absorb keeps the
-function and refuses a pinned move."""
+dangerous, the SiLU-pinned pair is not; a fixed-scale input behind a final norm leaves the writers
+weakly pinned; suggest + apply leaves none dangerous; absorb keeps the function and refuses a
+pinned move."""
 
 import pytest
 import torch
@@ -123,3 +124,21 @@ def test_architecture_notes():
     notes = free_scales(_model(), tokens()).notes
     assert any("attention calls [0]" in note for note in notes)
     assert any("scale the residual stream together" in note for note in notes)
+
+
+@pytest.mark.parametrize("final_norm", [True, False])
+def test_fixed_scale_input_behind_a_final_norm_is_weakly_pinned(final_norm):
+    torch.manual_seed(0)
+    model, x = LM(depth=1, affine=False, final_norm=final_norm).double(), tokens()
+    fixed = r"embed|.*\.(q|k|v|gate|up)" + ("" if final_norm else "|head")
+    rules = [ds.Rule(fixed, mode="unit", init="ones"), ds.Rule(".*", mode="plain")]
+    ds.apply(model, rules)
+    report = free_scales(model, x)
+    writers = {f"{B}.out.weight", f"{B}.down.weight"}
+    if final_norm:
+        assert [set(d.coeffs) for d in report.weak] == [writers]
+        assert report.weak[0].dangerous
+        assert report.weak[0].anchors == (f"{B}: aten::add",)
+        assert any("held only by a fixed-scale addend" in note for note in report.notes)
+    else:
+        assert report.weak == []

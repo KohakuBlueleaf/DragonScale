@@ -3,7 +3,9 @@ and which combinations an op needs fixed (constraints).
 
 A rule is `rule(call) -> (outputs, constraints)`: `call.deg(t)` is the degree vector of a tensor
 argument (zero for a scalar or a constant), `outputs` one degree per tensor output (a single value
-applies to all), `constraints` the vectors whose dot with the direction must be 0.
+applies to all), `constraints` the vectors whose dot with the direction must be 0. A constraint
+wrapped in `Anchor` comes from adding a fixed-scale term (degree 0) to a scaled one: it holds the
+scaled side only as long as the fixed term is not negligible next to it.
 """
 
 from collections.abc import Callable
@@ -43,6 +45,13 @@ class Call:
         return self.kwargs.get(name, default) if name else default
 
 
+@dataclass(frozen=True)
+class Anchor:
+    """A constraint set by a fixed-scale addend."""
+
+    vector: Tensor
+
+
 DegreeRule = Callable[[Call], tuple]
 RULES: dict[str, DegreeRule] = {}
 
@@ -73,14 +82,24 @@ def product(call: Call):
     return sum((call.deg(a) for a in call.args if isinstance(a, Tensor)), call.zero), []
 
 
+def is_zero(vector: Tensor) -> bool:
+    return bool(vector.abs().max() <= 1e-12)
+
+
 def additive(call: Call):
-    """Both sides must move together; a scalar side is a constant unless it is an epsilon."""
+    """Both sides must move together. A fixed-scale side (degree 0, or a scalar that is not an
+    epsilon) anchors the other: the output carries the scaled side's degree and the constraint is
+    an `Anchor`."""
     a, b = call.arg(0), call.arg(1, "other")
     if isinstance(a, Tensor) and isinstance(b, Tensor):
-        return call.deg(a), [call.deg(a) - call.deg(b)]
+        da, db = call.deg(a), call.deg(b)
+        if is_zero(da) != is_zero(db):
+            scaled_side = db if is_zero(da) else da
+            return scaled_side, [Anchor(scaled_side)]
+        return da, [da - db]
     tensor, scalar = (a, b) if isinstance(a, Tensor) else (b, a)
     small = isinstance(scalar, int | float) and abs(scalar) <= EPS_SCALAR
-    return call.deg(tensor), [] if small else [call.deg(tensor)]
+    return call.deg(tensor), [] if small else [Anchor(call.deg(tensor))]
 
 
 def matmul_add(call: Call):

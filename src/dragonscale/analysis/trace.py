@@ -13,21 +13,24 @@ from torch import Tensor, nn
 from torch.utils._python_dispatch import TorchDispatchMode
 from torch.utils._pytree import tree_leaves
 
-from dragonscale.analysis.rules import ATTENTION, Call, nonlinear, rule_of, zero_like
+from dragonscale.analysis.rules import ATTENTION, Anchor, Call, nonlinear, rule_of, zero_like
 
 ATTENTION_OPS = {f"aten::{name}" for name in ATTENTION}
 
 
 @dataclass
 class DegreeTrace:
-    """What one forward gave: groups, constraints, the degrees of data-dependent tensors, the
-    degree of each module's first input (`module_inputs`, by path, in first-call order), and the
-    q and k degrees of every attention call (`attention`)."""
+    """What one forward gave: groups, constraints, anchors (constraints set by a fixed-scale
+    addend), the degrees of data-dependent tensors, the degree of each module's first input
+    (`module_inputs`, by path, in first-call order), and the q and k degrees of every attention
+    call (`attention`). A source is the module path and op that set the constraint."""
 
     names: list[str]
     shapes: list[tuple[int, ...]]
     constraints: list[Tensor] = field(default_factory=list)
     sources: list[str] = field(default_factory=list)
+    anchors: list[Tensor] = field(default_factory=list)
+    anchor_sources: list[str] = field(default_factory=list)
     activations: list[Tensor] = field(default_factory=list)
     unknown: Counter = field(default_factory=Counter)
     module_inputs: dict[str, Tensor] = field(default_factory=dict)
@@ -37,6 +40,11 @@ class DegreeTrace:
         """The stacked constraints, `[constraints, groups]` (one zero row when there is none)."""
         k = len(self.names)
         return torch.stack(self.constraints) if self.constraints else torch.zeros(1, k).double()
+
+    def anchor_matrix(self) -> Tensor:
+        """The stacked anchors, `[anchors, groups]` (one zero row when there is none)."""
+        k = len(self.names)
+        return torch.stack(self.anchors) if self.anchors else torch.zeros(1, k).double()
 
     def degrees(self) -> Tensor:
         """The stacked degrees of every data-dependent tensor, `[tensors, groups]`."""
@@ -54,6 +62,7 @@ class _DegreeRecorder(TorchDispatchMode):
         self.degree: dict[int, Tensor] = {}
         self.data: set[int] = set()
         self.alive: list[Tensor] = []
+        self.paths: list[str] = []
         for k, param in enumerate(params):
             self.degree[id(param)] = self.zero.clone().index_fill_(0, torch.tensor(k), 1.0)
             self.alive.append(param)
@@ -65,8 +74,16 @@ class _DegreeRecorder(TorchDispatchMode):
     def degree_of(self, tensor: Tensor) -> Tensor:
         return self.degree.get(id(tensor), self.zero)
 
-    def constrain(self, vector: Tensor, source: str) -> None:
-        if vector.abs().max().item() > 1e-12:
+    def constrain(self, vector: Tensor | Anchor, op: str) -> None:
+        anchor = isinstance(vector, Anchor)
+        vector = vector.vector if anchor else vector
+        if vector.abs().max().item() <= 1e-12:
+            return
+        source = f"{(self.paths[-1] or 'model') if self.paths else 'model'}: {op}"
+        if anchor:
+            self.trace.anchors.append(vector)
+            self.trace.anchor_sources.append(source)
+        else:
             self.trace.constraints.append(vector)
             self.trace.sources.append(source)
 
@@ -124,15 +141,22 @@ def trace_degrees(model: nn.Module, *inputs, **kwargs) -> DegreeTrace:
         if isinstance(value, Tensor):
             recorder.mark_input(value)
 
-    # The degree of each module's first input, at its first call
-    def record_input(path: str):
+    # The degree of each module's first input, at its first call; the module being run
+    def enter(path: str):
         def hook(module: nn.Module, args) -> None:
+            recorder.paths.append(path)
             if args and isinstance(args[0], Tensor):
                 result.module_inputs.setdefault(path, recorder.degree_of(args[0]))
 
         return hook
 
-    handles = [m.register_forward_pre_hook(record_input(p)) for p, m in model.named_modules()]
+    def leave(module: nn.Module, args, out) -> None:
+        recorder.paths.pop()
+
+    handles = []
+    for path, module in model.named_modules():
+        handles.append(module.register_forward_pre_hook(enter(path)))
+        handles.append(module.register_forward_hook(leave))
     try:
         with torch.enable_grad(), recorder:
             out = model(*inputs, **kwargs)

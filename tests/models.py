@@ -32,11 +32,21 @@ class Block(nn.Module):
 
 
 class LM(nn.Module):
-    def __init__(self, vocab=32, dim=16, depth=2, heads=2, hidden=32, affine=True, tied=False):
+    def __init__(
+        self,
+        vocab=32,
+        dim=16,
+        depth=2,
+        heads=2,
+        hidden=32,
+        affine=True,
+        tied=False,
+        final_norm=True,
+    ):
         super().__init__()
         self.embed = nn.Embedding(vocab, dim)
         self.blocks = nn.ModuleList(Block(dim, heads, hidden, affine) for _ in range(depth))
-        self.norm = nn.RMSNorm(dim, eps=1e-6, elementwise_affine=affine)
+        self.norm = nn.RMSNorm(dim, eps=1e-6, elementwise_affine=affine) if final_norm else None
         self.head = nn.Linear(dim, vocab, bias=False)
         if tied:
             self.head.weight = self.embed.weight
@@ -49,7 +59,7 @@ class LM(nn.Module):
         x = self.embed(tokens)
         for block in self.blocks:
             x = block(x)
-        return self.head(self.norm(x))
+        return self.head(self.norm(x) if self.norm is not None else x)
 
 
 def tokens(vocab: int = 32, shape=(2, 6)) -> torch.Tensor:

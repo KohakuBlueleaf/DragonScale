@@ -1,5 +1,8 @@
 """`free_scales`: the null space of a degree trace's constraints, as named directions, each
-labelled parameter-only, activation-moving, or dangerous (activation-moving with a matrix in it)."""
+labelled parameter-only, activation-moving, or dangerous (activation-moving with a matrix in it).
+
+A weakly pinned direction is free under every constraint except anchors: only a fixed-scale addend
+holds it, and once the scaled term outgrows that addend the direction is nearly free."""
 
 from dataclasses import dataclass
 
@@ -19,6 +22,7 @@ class Direction:
     coeffs: dict[str, float]
     moves_activations: bool
     fast_ends: tuple[str, ...]
+    anchors: tuple[str, ...] = ()
 
     @property
     def dangerous(self) -> bool:
@@ -29,13 +33,15 @@ class Direction:
         label = "dangerous" if self.dangerous else (
             "activation-moving" if self.moves_activations else "parameter-only"
         )  # fmt: skip
-        return f"{label}: {terms}"
+        held = f" (held by: {'; '.join(self.anchors)})" if self.anchors else ""
+        return f"{label}: {terms}{held}"
 
 
 @dataclass(frozen=True)
 class FreeScales:
-    """Every free direction of one model on one input, in reduced row-echelon form, and the
-    architecture notes a weight patch cannot address (`notes`)."""
+    """Every free direction of one model on one input, in reduced row-echelon form, the weakly
+    pinned directions with the anchors that hold them (`weak`), and the architecture notes a weight
+    patch cannot address (`notes`)."""
 
     names: list[str]
     shapes: list[tuple[int, ...]]
@@ -44,6 +50,7 @@ class FreeScales:
     constraints: int
     unknown: dict[str, int]
     notes: list[str]
+    weak: list[Direction]
 
     @property
     def dangerous(self) -> list[Direction]:
@@ -69,7 +76,14 @@ class FreeScales:
             f"{len(self.directions)} free direction(s), {len(self.dangerous)} dangerous, "
             f"{self.constraints} constraints over {len(self.names)} groups"
         ]
-        lines += [f"  {d.describe()}" for d in self.directions]
+        alone = [d for d in self.directions if len(d.coeffs) == 1 and not d.moves_activations]
+        lines += [f"  {d.describe()}" for d in self.directions if d not in alone]
+        if alone:
+            names = ", ".join(next(iter(d.coeffs)) for d in alone)
+            lines.append(f"  parameter-only, one group each ({len(alone)}): {names}")
+        if self.weak:
+            lines.append(f"{len(self.weak)} weakly pinned direction(s), held only by anchors:")
+            lines += [f"  {d.describe()}" for d in self.weak]
         if self.unknown:
             lines.append(f"  ops without a rule (treated as nonlinear): {dict(self.unknown)}")
         if self.notes:
@@ -107,12 +121,39 @@ def echelon(basis: Tensor) -> Tensor:
     return m
 
 
+def directions_of(result: DegreeTrace, basis: Tensor) -> list[Direction]:
+    """Readable directions spanning `basis`, labelled, each with the anchors it moves against."""
+    degrees = result.degrees()
+    anchors = result.anchor_matrix()
+    out = []
+    for row in echelon(basis):
+        coeffs = {n: round(c, 6) for n, c in zip(result.names, row.tolist(), strict=True) if c}
+        moves = bool((degrees @ row).abs().max() > TOL)
+        fast_ends = tuple(n for n in coeffs if len(result.shapes[result.names.index(n)]) >= 2)
+        held = []
+        if result.anchors:
+            for source, value in zip(result.anchor_sources, (anchors @ row).tolist(), strict=True):
+                if abs(value) > TOL and source not in held:
+                    held.append(source)
+        out.append(Direction(coeffs, moves, fast_ends, tuple(held)))
+    return out
+
+
+def complement(inner: Tensor, outer: Tensor) -> Tensor:
+    """An orthonormal basis of the part of span(`outer`) orthogonal to span(`inner`)."""
+    if outer.numel() == 0:
+        return outer
+    rest = outer - inner @ (inner.T @ outer) if inner.numel() else outer
+    u, sigma, _ = torch.linalg.svd(rest, full_matrices=False)
+    return u[:, sigma > 1e-8 * max(sigma.max().item(), 1.0)] if sigma.numel() else rest
+
+
 def architecture_notes(
-    result: DegreeTrace, basis: Tensor, directions: list[Direction]
+    result: DegreeTrace, basis: Tensor, directions: list[Direction], weak: list[Direction]
 ) -> list[str]:
-    """Attention calls whose q and k trade scale freely, and parameters of two or more modules
-    that scale the residual stream together (an activation-moving direction with every
-    coefficient positive)."""
+    """Attention calls whose q and k trade scale freely, parameters of two or more modules that
+    scale the residual stream together (an activation-moving direction with every coefficient
+    positive), and dangerous weakly pinned directions."""
     notes = []
     if basis.numel():
         free_qk = [
@@ -130,27 +171,35 @@ def architecture_notes(
                 f"{', '.join(d.coeffs)} scale the residual stream together; "
                 "give the model input a fixed scale (an embedding: mode 'unit')"
             )
+    for d in weak:
+        if d.dangerous:
+            notes.append(
+                f"{', '.join(d.coeffs)} are held only by a fixed-scale addend "
+                f"({'; '.join(d.anchors)}); once they outgrow it this scale is nearly free. Let "
+                "the output read this stream directly, without a norm in between, so the loss "
+                "sets its scale"
+            )
     return notes
 
 
 def solve(result: DegreeTrace) -> FreeScales:
-    """The free directions of a degree trace."""
-    basis = null_space(result.matrix())
-    degrees = result.degrees()
-    directions = []
-    for row in echelon(basis):
-        coeffs = {n: round(c, 6) for n, c in zip(result.names, row.tolist(), strict=True) if c}
-        moves = bool((degrees @ row).abs().max() > TOL)
-        fast_ends = tuple(n for n in coeffs if len(result.shapes[result.names.index(n)]) >= 2)
-        directions.append(Direction(coeffs, moves, fast_ends))
+    """The free directions of a degree trace, and its weakly pinned ones."""
+    hard = result.matrix()
+    basis = null_space(torch.cat([hard, result.anchor_matrix()]))
+    weak_basis = complement(basis, null_space(hard))
+    directions = [
+        Direction(d.coeffs, d.moves_activations, d.fast_ends) for d in directions_of(result, basis)
+    ]
+    weak = directions_of(result, weak_basis) if weak_basis.numel() else []
     return FreeScales(
         result.names,
         result.shapes,
         directions,
         basis,
-        len(result.constraints),
+        len(result.constraints) + len(result.anchors),
         dict(result.unknown),
-        architecture_notes(result, basis, directions),
+        architecture_notes(result, basis, directions, weak),
+        weak,
     )
 
 
