@@ -34,6 +34,7 @@ PRECISION_STYLE = {"fp16": "-", "fp32": "--"}
 LR_STYLES = ("-", "--", ":")
 BYTE_LM = "byte-level LM on the Python standard library"
 B_STEPS = 16_000  # B is compared up to the step every preset reached
+JIT_LOSS_FROM = 2_000  # JiT loss is compared from here: the first steps' losses are outliers
 KERNEL_BACKENDS = {"triton": "#009E73", "compile": "#0072B2", "eager": "#999999"}
 JIT_VARIANTS = (  # (folder, file prefix, label, color, line style)
     ("jit_diag", "stock-tokens-lr", "stock", "#D55E00", "-"),
@@ -501,15 +502,16 @@ def figure_jit() -> None:
     runs = [r for r in runs_of("jit_tokens", group="jit") if knob(r, "PRECISION") == "fp16"]
     lrs = sorted({knob(r, "LR") for r in runs})
     metrics = (
-        ("held_loss", "held-out velocity loss", False),
+        ("held_loss", f"held-out velocity loss, from step {JIT_LOSS_FROM:,}", False),
         ("max/stream_max", "peak residual stream |x|", True),
         ("max/logit_max", "largest attention logit", False),
     )
     fig, axes = figure(3, width=13)
     for run in runs:
         preset, lr = knob(run, "PRESET"), knob(run, "LR")
-        rows = [r for r in run["logs"] if r["step"] > 0]
         for ax, (key, _, _) in zip(axes, metrics, strict=True):
+            start = JIT_LOSS_FROM if key == "held_loss" else 1
+            rows = [r for r in run["logs"] if r["step"] >= start]
             ax.plot(
                 [r["step"] for r in rows],
                 [r.get(key, math.nan) for r in rows],

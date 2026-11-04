@@ -389,7 +389,9 @@ model as in stock. Without it, and with the context tokens read-only, the stream
 
 ![JiT-B/16 over 10k steps per preset and learning rate: held-out velocity loss and peak stream](docs/assets/jit.png)
 
-| preset | lr | held-out loss, 10k steps | peak stream |
+The loss is compared from step 2k: the first few hundred steps' losses are outliers.
+
+| preset | lr | best held-out loss, steps 2k-10k | peak stream |
 | --- | --- | --- | --- |
 | stock | 2e-4 | 0.264 | 779 |
 | stock | 1e-3 | 0.219 | 4,506 |
