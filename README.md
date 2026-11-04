@@ -220,7 +220,7 @@ width per preset. -->
 ### JiT-B/16 on Flowers-102
 
 Pixel-space diffusion with the official JiT recipe (x-prediction, velocity loss, adaLN-Zero) at
-256 px, batch 128, 10k steps.
+256 px, batch 64, 10k steps.
 
 <!-- RESULT JiT: per preset and learning rate, the held-out velocity loss and the peak stream,
 adaLN gate and attention-logit values over training; stock in fp16 and fp32. -->
