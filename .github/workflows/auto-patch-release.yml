@@ -69,7 +69,9 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git commit -am "bump to version ${next}"
           git tag "v${next}"
-          git push origin main --follow-tags
+          # --follow-tags skips a lightweight tag: push the tag by name
+          git push origin main
+          git push origin "v${next}"
 
       # A GITHUB_TOKEN push starts no workflow, so Release is dispatched explicitly
       - name: Dispatch the release workflow
