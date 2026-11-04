@@ -20,6 +20,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from common import RUNS, figure_path
 from matplotlib.lines import Line2D
+from matplotlib.patches import FancyBboxPatch
 from matplotlib.ticker import FuncFormatter, LogLocator, NullFormatter
 
 ONLY = ""  # "" = every figure; otherwise one of a b depth width d pareto jit
@@ -32,6 +33,19 @@ COLORS = {"stock": "#D55E00", "matrices": "#0072B2", "arch": "#009E73"}  # Okabe
 PRECISION_STYLE = {"fp16": "-", "fp32": "--"}
 LR_STYLES = ("-", "--", ":")
 BYTE_LM = "byte-level LM on the Python standard library"
+B_STEPS = 16_000  # B is compared up to the step every preset reached
+KERNEL_BACKENDS = {"triton": "#009E73", "compile": "#0072B2", "eager": "#999999"}
+JIT_VARIANTS = (  # (folder, file prefix, label, color, line style)
+    ("jit_diag", "stock-tokens-lr", "stock", "#D55E00", "-"),
+    ("jit_diag", "arch-tokens-lr", "arch with a final norm", "0.45", "--"),
+    ("jit_diag_read_only", "arch-tokens-nofinal", "arch", "#009E73", "-"),
+)
+RED, GREEN, GREY = "#B03A2E", "#1E7B5F", "0.35"
+TEASER_NAMES = {
+    "stock": "plain pre-norm transformer",
+    "matrices": "plain + DragonScale patch",
+    "arch": "ours, pre-norm transformer",
+}
 
 plt.rcParams.update(
     {
@@ -72,8 +86,11 @@ def read_run(path: Path) -> dict:
     }
 
 
-def runs_of(experiment: str, group: str = "bytelm") -> list[dict]:
-    return [read_run(p) for p in sorted((RUNS / group / experiment).glob("*.jsonl"))]
+def runs_of(experiment: str, group: str = "bytelm", partial: bool = False) -> list[dict]:
+    """The runs of an experiment; a run that neither finished nor diverged is left out (a
+    placeholder in tables) unless `partial`."""
+    runs = [read_run(p) for p in sorted((RUNS / group / experiment).glob("*.jsonl"))]
+    return [r for r in runs if partial or r["done"] != "running" or r["diverged"]]
 
 
 def peak(run: dict, key: str = "max/stream_max") -> float:
@@ -117,17 +134,23 @@ def label_better(ax) -> None:
     direction = getattr(ax, "better", None)
     if direction is None:
         return
+    if direction == "right":
+        ax.set_xlabel(f"{ax.get_xlabel()}   better \u2192")
+        return
+    if direction == "up":
+        ax.set_ylabel(f"{ax.get_ylabel()}   better \u2192")
+        return
     ax.set_ylabel(f"{ax.get_ylabel()}   \u2190 better")
     if direction == "down-left":
         ax.set_xlabel(f"\u2190 better   {ax.get_xlabel()}")
 
 
 def failed_strip(ax, xs: list, presets: list) -> None:
-    """Failed runs as x marks in a strip just above the panel."""
+    """Failed runs as x marks in a strip just above the panel, one row per preset."""
     for x, preset in zip(xs, presets, strict=True):
         ax.plot(
             x,
-            1.04,
+            1.03 + 0.045 * PRESETS.index(preset),
             "x",
             color=COLORS[preset],
             ms=7,
@@ -177,7 +200,8 @@ def save(fig, name: str) -> None:
     text = getattr(fig, "headline", None)
     legend = getattr(fig, "top_legend", None)
     if text and legend is not None:
-        legend.set_title(text, prop={"size": 11, "weight": "bold"})
+        size = getattr(fig, "headline_size", 11)
+        legend.set_title(text, prop={"size": size, "weight": "bold"})
     elif text:
         fig.suptitle(text, fontsize=11, fontweight="bold")
     path = figure_path(name)
@@ -259,7 +283,7 @@ def b_value(row: dict, key: str) -> float:
 
 
 def figure_b() -> None:
-    runs = sorted(runs_of("b_long"), key=lambda r: knob(r, "LR"))
+    runs = sorted(runs_of("b_long", partial=True), key=lambda r: knob(r, "LR"))
     lrs = sorted({knob(r, "LR") for r in runs})
     metrics = (
         ("max/stream_max", "peak residual stream |x|", "residual stream"),
@@ -269,7 +293,7 @@ def figure_b() -> None:
     fig, axes = figure(3, width=13)
     for run in runs:
         preset, lr = knob(run, "PRESET"), knob(run, "LR")
-        rows = [r for r in run["logs"] if r["step"] > 0]
+        rows = [r for r in run["logs"] if 0 < r["step"] <= B_STEPS]
         for ax, (key, _, _) in zip(axes, metrics, strict=True):
             ys = [b_value(r, key) for r in rows]
             if not any(math.isfinite(y) for y in ys):
@@ -287,7 +311,7 @@ def figure_b() -> None:
     top_legend(fig, styles)
     headline(
         fig,
-        f"Growth over 100k steps: {BYTE_LM}, 8 blocks, dim 256, fp16",
+        f"Growth over {B_STEPS // 1000}k steps: {BYTE_LM}, 8 blocks, dim 256, fp16",
     )
     footnote(
         fig,
@@ -510,19 +534,9 @@ def figure_jit() -> None:
 
 def figure_final_norm() -> None:
     """JiT at lr 1e-3: the image tokens' stream per block at the last step, and its peak over
-    training, for stock, arch with a final norm, arch without it, and arch with input norms."""
-    variants = (
-        ("jit_diag", "stock-tokens-lr", "stock (final norm)", COLORS["stock"], "-"),
-        ("jit_diag", "arch-tokens-lr", "arch with final norm", COLORS["arch"], "--"),
-        ("jit_diag", "arch-tokens-nofinal", "arch, no final norm", COLORS["matrices"], "-"),
-        (
-            "jit_diag_input_norm",
-            "arch-tokens-nofinal",
-            "arch, no final norm, input norms",
-            "0.15",
-            "-",
-        ),
-    )
+    training, for stock, arch with a final norm, and arch as proposed (input norms, read-only
+    context tokens, no final norm)."""
+    variants = JIT_VARIANTS
     fig, (blocks, steps) = figure(2, width=11)
     handles = []
     for folder, prefix, label, color, style in variants:
@@ -569,10 +583,310 @@ def figure_final_norm() -> None:
         log_axis(ax.yaxis, dense=True)
         better(ax, "down")
     steps.xaxis.set_major_formatter(FuncFormatter(plain))
-    fig.top_legend = fig.legend(handles=handles, loc="outside upper center", ncol=2, frameon=False)
-    headline(fig, "Where the stream grows: JiT-B/16 on Flowers-102, lr 1e-3, fp16")
+    fig.top_legend = fig.legend(handles=handles, loc="outside upper center", ncol=3, frameon=False)
+    headline(fig, "Where the stream grows: JiT-B/16 on Flowers-102, lr 1e-3, fp16, 2k steps")
     footnote(fig, "loss: best held-out velocity loss so far")
     save(fig, "final_norm")
+
+
+# ---- kernels ----
+
+
+KERNEL_SHAPES = (  # (benchmark case, panel title: the weight shape only)
+    ("byte LM gate/up 768x256", "weight 768 x 256"),
+    ("JiT gate/up 2048x768", "weight 2048 x 768"),
+    ("LM up 11008x4096", "weight 11008 x 4096"),
+)
+GPU_NAMES = {"Tesla_V100-SXM2-16GB": "V100", "NVIDIA_GeForce_RTX_2080_Ti": "2080 Ti",
+             "NVIDIA_GeForce_RTX_3090": "3090", "NVIDIA_GeForce_RTX_4090": "4090"}  # fmt: skip
+
+
+def figure_kernels() -> None:
+    """Unit-row forward + backward effective bandwidth per backend: the bytes the two ops must
+    move over their time, one panel per weight shape, one group of bars per GPU (fp32 weights);
+    the dashed line is the card's memory bandwidth."""
+    files = sorted((RUNS / "speed").glob("*-fp32.jsonl"))
+    if not files:
+        return
+    by_gpu = {}
+    for path in files:
+        gpu = GPU_NAMES.get(path.stem.removesuffix("-fp32"), path.stem)
+        rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+        by_gpu[gpu] = {(r["case"], r["backend"]): r for r in rows}
+    gpus = [g for g in ("V100", "2080 Ti", "3090", "4090") if g in by_gpu]
+    fig, axes = figure(len(KERNEL_SHAPES), width=15)
+    width = 0.8 / len(KERNEL_BACKENDS)
+    for ax, (case, title) in zip(axes, KERNEL_SHAPES, strict=True):
+        large = case == KERNEL_SHAPES[-1][0]
+        for g, gpu in enumerate(gpus):
+            for i, (backend, color) in enumerate(KERNEL_BACKENDS.items()):
+                r = by_gpu[gpu].get((case, backend))
+                if r is None:
+                    continue
+                moved = r["fwd_gb_s"] * r["fwd_ms"] + r["bwd_gb_s"] * r["bwd_ms"]
+                rate = moved / (r["fwd_ms"] + r["bwd_ms"])
+                x = g + (i - 1) * width
+                ax.bar(x, rate, width, color=color)
+                peak = r["fwd_gb_s"] / r["fwd_peak"] if r.get("fwd_peak") else None
+                if large and peak:
+                    ax.text(x, rate, f"{100 * rate / peak:.0f}%", ha="center", va="bottom",
+                            fontsize=7)  # fmt: skip
+            if peak:
+                ax.plot([g - 0.45, g + 0.45], [peak, peak], "--", color="0.35", lw=1)
+        ax.set_xticks(range(len(gpus)))
+        ax.set_xticklabels(gpus)
+        ax.set(ylabel="effective bandwidth, GB/s", title=title)
+        ax.grid(axis="x", visible=False)
+        better(ax, "up")
+    handles = [Line2D([], [], color=c, lw=6, label=b) for b, c in KERNEL_BACKENDS.items()]
+    handles.append(Line2D([], [], color="0.35", ls="--", lw=1, label="card's memory bandwidth"))
+    fig.top_legend = fig.legend(
+        handles=handles, loc="outside upper center", ncol=len(handles), frameon=False
+    )
+    headline(fig, "Unit-row op per backend, same weight shape, forward + backward, fp32 weights")
+    footnote(
+        fig,
+        "labels on the large weight: share of the card's memory bandwidth. Small weights are "
+        "bound by launch time; the grouped launch covers them",
+    )
+    save(fig, "kernels")
+
+
+# ---- teaser ----
+
+
+TEASER_FONT = 14
+
+
+def _box(ax, x, y, text, fill, w=3.6, h=1.0, size=TEASER_FONT, color="black"):
+    """A rounded box centred at (x, y) in data coordinates."""
+    ax.add_patch(
+        FancyBboxPatch(
+            (x - w / 2, y - h / 2),
+            w,
+            h,
+            boxstyle="round,pad=0.02,rounding_size=0.18",
+            fc=fill,
+            ec="0.3",
+            lw=1.2,
+            zorder=3,
+        )
+    )
+    ax.text(x, y, text, ha="center", va="center", fontsize=size, color=color, zorder=4)
+
+
+def _arrow(ax, start, end, color="0.3", lw=1.6):
+    ax.annotate(
+        "",
+        end,
+        start,
+        arrowprops={"arrowstyle": "-|>", "color": color, "lw": lw, "shrinkA": 0, "shrinkB": 0},
+        zorder=2,
+    )
+
+
+def _add(ax, x, y, text=r"$+$"):
+    ax.add_patch(plt.Circle((x, y), 0.36, fc="white", ec="0.3", lw=1.4, zorder=3))
+    ax.text(x, y, text, ha="center", va="center", fontsize=TEASER_FONT + 2, zorder=4)
+
+
+def _note(ax, x, y, text, color, size=TEASER_FONT):
+    ax.text(x, y, text, ha="left", va="center", fontsize=size, color=color, zorder=4)
+
+
+STREAM_X, BRANCH_X, GLYPH_X = 1.9, 5.5, 7.95
+NARROW_W, WIDE_W, BOX_H = 3.1, 4.3, 1.6
+ATTN_Y, MLP_Y, TOP_Y, HEAD_Y = 2.2, 6.9, 11.5, 13.1
+
+
+def _block(ax, y0, lower, upper, lower_fill, upper_fill, lower_w, upper_w, add_text=r"$+$"):
+    """One residual sublayer: from the stream at y0 through two boxes, back into the stream with
+    an add at the upper box. Returns (lower y, upper y)."""
+    y1 = y0 + 2.1
+    _arrow(ax, (STREAM_X, y0), (BRANCH_X - lower_w / 2, y0))
+    _box(ax, BRANCH_X, y0, lower, lower_fill, w=lower_w, h=BOX_H)
+    _box(ax, BRANCH_X, y1, upper, upper_fill, w=upper_w, h=BOX_H)
+    _arrow(ax, (BRANCH_X, y0 + BOX_H / 2), (BRANCH_X, y1 - BOX_H / 2))
+    _arrow(ax, (BRANCH_X - upper_w / 2, y1), (STREAM_X + 0.36, y1))
+    _add(ax, STREAM_X, y1, add_text)
+    return y0, y1
+
+
+def _rows(ax, y, lengths, color, gains=None, gain_color=None, label=None):
+    """A weight as its rows: one bar per row, its length the row's norm; with `gains`, a gain
+    column to the right."""
+    n, h, w = len(lengths), 1.25, 1.35
+    for i, length in enumerate(lengths):
+        yi = y + h / 2 - (i + 0.5) * h / n
+        ax.add_patch(plt.Rectangle((GLYPH_X, yi - 0.4 * h / n), length * w, 0.8 * h / n, fc=color,
+                                   ec="none", zorder=3))  # fmt: skip
+    ax.plot([GLYPH_X, GLYPH_X], [y - h / 2, y + h / 2], color="0.3", lw=1, zorder=4)
+    if gains is not None:
+        gx = GLYPH_X + w + 0.35
+        for i, g in enumerate(gains):
+            yi = y + h / 2 - (i + 0.5) * h / n
+            ax.add_patch(plt.Rectangle((gx, yi - 0.4 * h / n), g * 0.9, 0.8 * h / n,
+                                       fc=gain_color, ec="none", zorder=3))  # fmt: skip
+        ax.plot([gx, gx], [y - h / 2, y + h / 2], color="0.3", lw=1, zorder=4)
+        ax.text(gx + 0.45, y + h / 2 + 0.25, "$g$", ha="center", fontsize=TEASER_FONT,
+                color=gain_color)  # fmt: skip
+    if label:
+        ax.text(GLYPH_X, y - h / 2 - 0.15, label, ha="left", va="top", fontsize=TEASER_FONT - 1,
+                color=color)  # fmt: skip
+
+
+def _diagram_axes(ax, title, color, caption):
+    ax.set_axis_off()
+    ax.set(xlim=(0, 11), ylim=(-2.2, 15.4))
+    ax.text(5.5, 15.2, title, ha="center", va="top", fontsize=TEASER_FONT + 5,
+            fontweight="bold", color=color)  # fmt: skip
+    ax.text(5.5, -1.75, caption, ha="center", va="center", fontsize=TEASER_FONT + 1,
+            color=color, style="italic")  # fmt: skip
+
+
+def _stream(ax, y_from, y_to, label, color, grow=False):
+    """The residual stream: a band that widens upward when its scale grows."""
+    if grow:
+        ys = [y_from, y_to, y_to, y_from]
+        xs = [STREAM_X - 0.05, STREAM_X - 0.32, STREAM_X + 0.32, STREAM_X + 0.05]
+        ax.add_patch(plt.Polygon(list(zip(xs, ys, strict=True)), fc=color, ec="none", zorder=1))
+    else:
+        ax.plot([STREAM_X, STREAM_X], [y_from, y_to], color=color, lw=3.2, zorder=1,
+                solid_capstyle="butt")  # fmt: skip
+    ax.text(STREAM_X - 0.55, (ATTN_Y + MLP_Y) / 2 + 1.0, label, rotation=90, ha="right",
+            va="center", fontsize=TEASER_FONT, color=color)  # fmt: skip
+
+
+UNEVEN = [0.55, 1.0, 0.3, 0.85, 0.65]
+EVEN = [0.7] * 5
+GAINS = [0.35, 0.8, 0.5, 0.2, 0.6]
+
+
+def _teaser_stock(ax) -> None:
+    fill, norm = "#F6DCCB", "#FBEDE4"
+    _diagram_axes(ax, "pre-norm transformer", RED, "free scales drift with noise")
+    _box(ax, STREAM_X, 0.3, "embedding", fill, w=3.3, h=0.9)
+    _stream(ax, 0.75, TOP_Y - 0.45, r"stream $x$,   $\Vert x\Vert\uparrow$", RED, grow=True)
+    _, attn = _block(ax, ATTN_Y, r"RMSNorm$\cdot\gamma$", r"$W_{qkv}\to$ attn" "\n" r"$\to W_o$", norm,
+                     fill, NARROW_W, WIDE_W)  # fmt: skip
+    _, mlp = _block(ax, MLP_Y, r"RMSNorm$\cdot\gamma$", r"$W_{up}\to$ SiLU" "\n" r"$\to W_{down}$",
+                    norm, fill, NARROW_W, WIDE_W)  # fmt: skip
+    _box(ax, STREAM_X, TOP_Y, r"RMSNorm$\cdot\gamma$", norm, w=3.5, h=0.9)
+    _arrow(ax, (STREAM_X, TOP_Y + 0.45), (STREAM_X, HEAD_Y - 0.45))
+    _box(ax, STREAM_X, HEAD_Y, r"head $W$", fill, w=2.4, h=0.9)
+    _rows(ax, attn, UNEVEN, RED, label=r"$\gamma c,W/c$;  $W_q c,W_k/c$")
+    _rows(ax, mlp, UNEVEN, RED, label=r"$W_{up}\,c,\ W_{down}/c$")
+    _note(ax, 3.85, TOP_Y, r"$x\,c$ is free:" "\n" "the norm hides it", RED)
+
+
+def _teaser_fixed(ax) -> None:
+    fill, norm = "#DCE3EC", "#EDF1F6"
+    _diagram_axes(ax, "nGPT / EDM2", GREY, "every scale fixed by construction")
+    _box(ax, STREAM_X, 0.3, r"$\hat w$ embedding", fill, w=3.5, h=0.9)
+    _stream(ax, 0.75, HEAD_Y - 0.45, r"stream $h$,   $\Vert h\Vert = 1$", GREY)
+    attn, _ = _block(ax, ATTN_Y, "cosine attn:\n" r"$s_{qk}\,\hat q\cdot\hat k$,  $\hat W_{qkv},\hat W_o$",
+                     "Norm", fill, norm, WIDE_W, NARROW_W, r"$\oplus$")  # fmt: skip
+    mlp, _ = _block(ax, MLP_Y, r"$\hat W_{up}\to$ SiLU$\cdot s_u$" "\n" r"$\to\hat W_{down}$",
+                    "Norm", fill, norm, WIDE_W, NARROW_W, r"$\oplus$")  # fmt: skip
+    _box(ax, STREAM_X, HEAD_Y, r"head $s_z\,\hat W$", fill, w=2.8, h=0.9)
+    _rows(ax, attn + 2.1, EVEN, GREY, label=r"$\hat w = w/\Vert w\Vert$, every step")
+    _rows(ax, mlp + 2.1, EVEN, GREY, label=r"$\alpha, s_{qk}, s_u, s_v$ by hand")
+    _note(ax, 2.5, TOP_Y - 0.1,
+          r"$\oplus$  nGPT: $h\leftarrow\mathrm{Norm}(h+\alpha\,(y-h))$" "\n"
+          r"$\oplus$  EDM2: $\frac{(1-t)\,x+t\,y}{\sqrt{(1-t)^2+t^2}}$", GREY)  # fmt: skip
+
+
+def _teaser_ours(ax) -> None:
+    fill, norm = "#CFE8E0", "#E6F3EE"
+    unit = r"$\frac{W}{\Vert W\Vert_{row}}$"
+    _diagram_axes(ax, "DragonScale", GREEN, "same output at step 0, on the model you have")
+    _box(ax, STREAM_X, -0.6, "input", "white", w=2.2, h=0.7)
+    _arrow(ax, (STREAM_X, -0.25), (STREAM_X, 0.15))
+    _box(ax, STREAM_X, 0.6, "Norm", norm, w=2.2, h=0.85)
+    _stream(ax, 1.03, HEAD_Y - 0.6, r"stream $x$", GREEN)
+    _, attn = _block(ax, ATTN_Y, "Norm", "attn: every\n" r"$W\to g\odot$" + unit, norm, fill,
+                     NARROW_W, WIDE_W)  # fmt: skip
+    _, mlp = _block(ax, MLP_Y, "Norm", "MLP: every\n" r"$W\to g\odot$" + unit, norm, fill,
+                    NARROW_W, WIDE_W)  # fmt: skip
+    _box(ax, STREAM_X, HEAD_Y, "head " + unit, fill, w=2.8, h=1.2)
+    _rows(ax, attn, EVEN, GREEN, GAINS, "#0B5D44", label="unit rows, one gain per row")
+    _rows(ax, mlp, EVEN, GREEN, GAINS, "#0B5D44", label="the loss moves $g$")
+    _note(ax, GLYPH_X - 0.2, MLP_Y, "norms:\nno affine", GREEN)
+    _note(ax, 3.85, TOP_Y, "no final norm:" "\n" "the head reads" "\n" "the stream", GREEN)
+
+
+def _teaser_jit(ax) -> None:
+    for folder, prefix, label, color, style in JIT_VARIANTS:
+        paths = sorted((RUNS / "jit" / folder).glob(f"{prefix}*.jsonl"))
+        if not paths or label.startswith("arch with"):
+            continue
+        logs = [
+            r for r in read_run(paths[0])["logs"] if r["step"] > 0 and "blocks.0/image_max" in r
+        ]
+        depth = sum(1 for k in logs[-1] if k.startswith("blocks.") and k.endswith("/image_max"))
+        peaks = [max(r[f"blocks.{j}/image_max"] for j in range(depth)) for r in logs]
+        ax.plot([r["step"] for r in logs], peaks, style, color=color, lw=2)
+        name = TEASER_NAMES["stock" if label == "stock" else "arch"]
+        if label != "stock":  # in the empty band between the two curves
+            ax.text(0.98, 0.3, f"{name}: {peaks[-1]:,.0f}", transform=ax.transAxes, ha="right",
+                    color=color, fontsize=TEASER_FONT, fontweight="bold")  # fmt: skip
+            continue
+        ax.annotate(
+            f"{name}: {peaks[-1]:,.0f}",
+            (logs[-1]["step"], peaks[-1]),
+            xytext=(-6, 8),
+            textcoords="offset points",
+            ha="right",
+            color=color,
+            fontsize=TEASER_FONT,
+            fontweight="bold",
+        )
+    ax.set(
+        yscale="log",
+        xlabel="step",
+        ylabel="largest stream value",
+        title="JiT-B/16 diffusion, lr 1e-3, fp16",
+    )
+    log_axis(ax.yaxis, dense=True)
+    ax.xaxis.set_major_formatter(FuncFormatter(plain))
+    better(ax, "down")
+
+
+def _teaser_lr(ax) -> None:
+    runs = [r for r in runs_of("a_lr_precision") if knob(r, "PRECISION") == "fp16"]
+    for preset in PRESETS:
+        line(ax, [r for r in runs if knob(r, "PRESET") == preset], lambda r: knob(r, "LR"),
+             lambda r: r["best"])  # fmt: skip
+    ax.set(
+        xscale="log",
+        ylim=(0.9, 1.2),
+        xlabel="learning rate",
+        ylabel="best held-out loss",
+    )
+    ax.set_title("byte-level LM, 5k steps, fp16", pad=34)
+    log_axis(ax.xaxis)
+    ax.xaxis.set_major_formatter(FuncFormatter(plain))
+    better(ax, "down")
+
+
+def figure_teaser() -> None:
+    with plt.rc_context({"font.size": TEASER_FONT, "axes.titlesize": TEASER_FONT + 1,
+                         "axes.labelsize": TEASER_FONT, "xtick.labelsize": TEASER_FONT - 2,
+                         "ytick.labelsize": TEASER_FONT - 2, "legend.fontsize": TEASER_FONT}):  # fmt: skip
+        fig = plt.figure(figsize=(22, 9), layout="constrained")
+        grid = fig.add_gridspec(2, 4)
+        _teaser_stock(fig.add_subplot(grid[:, 0]))
+        _teaser_fixed(fig.add_subplot(grid[:, 1]))
+        _teaser_ours(fig.add_subplot(grid[:, 2]))
+        _teaser_jit(fig.add_subplot(grid[0, 3]))
+        _teaser_lr(fig.add_subplot(grid[1, 3]))
+        handles = [Line2D([], [], color=COLORS[p], lw=3, label=TEASER_NAMES[p]) for p in PRESETS]
+        fig.top_legend = fig.legend(
+            handles=handles, loc="outside upper center", ncol=len(handles), frameon=False
+        )
+        headline(fig, "DragonScale: no scale moves where the loss cannot see it")
+        fig.headline_size = TEASER_FONT + 8
+        save(fig, "teaser")
 
 
 def main() -> None:
@@ -586,6 +900,8 @@ def main() -> None:
         "pareto_setups": lambda: figure_pareto("setups"),
         "jit": figure_jit,
         "final_norm": figure_final_norm,
+        "kernels": figure_kernels,
+        "teaser": figure_teaser,
     }
     for name, make in figures.items():
         if ONLY in ("", name):
