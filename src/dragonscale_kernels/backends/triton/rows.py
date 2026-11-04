@@ -5,6 +5,8 @@ read once; otherwise the columns are walked in `BLOCK_C` chunks, one pass for th
 for the writes. Accumulation is fp32, fp64 for fp64 inputs.
 """
 
+import functools
+
 import torch
 import triton
 import triton.language as tl
@@ -16,6 +18,18 @@ from dragonscale_kernels.ops import FLOOR
 
 def _acc_dtype(t: Tensor) -> torch.dtype:
     return torch.float64 if t.dtype == torch.float64 else torch.float32
+
+
+def on_device(fn):
+    """Launch under the device of the first tensor argument, not the current device."""
+
+    @functools.wraps(fn)
+    def run(*args, **kwargs):
+        first = next(a for a in args if isinstance(a, Tensor))
+        with torch.cuda.device(first.device):
+            return fn(*args, **kwargs)
+
+    return run
 
 
 @triton.jit
@@ -155,6 +169,7 @@ def _grid(rows: int, block_r: int) -> tuple[int]:
     return (triton.cdiv(rows, block_r),)
 
 
+@on_device
 def row_norm(w: Tensor, view: tuple[int, ...], row_dims: tuple[int, ...]) -> Tensor:
     w2, _ = as_2d(w, view, row_dims)
     rows, cols = rows_cols(view, row_dims)
@@ -183,11 +198,13 @@ def _scaled_rows(w, view, row_dims, gain, radius, out_2d=None):
     return out, norms
 
 
+@on_device
 def unit_rows(w, view, row_dims, gain, radius):
     out2, norms = _scaled_rows(w, view, row_dims, gain, radius)
     return from_2d(out2, view, row_dims, w.shape), norms
 
 
+@on_device
 def unit_rows_bwd(grad, w, view, row_dims, norms, gain, radius):
     g2, _ = as_2d(grad, view, row_dims)
     w2, _ = as_2d(w, view, row_dims)
@@ -204,6 +221,7 @@ def unit_rows_bwd(grad, w, view, row_dims, norms, gain, radius):
     return from_2d(grad_w, view, row_dims, w.shape), grad_gain
 
 
+@on_device
 def project(t, w, view, row_dims):
     t2, _ = as_2d(t, view, row_dims)
     w2, _ = as_2d(w, view, row_dims)
@@ -217,6 +235,7 @@ def project(t, w, view, row_dims):
     return from_2d(out, view, row_dims, t.shape)
 
 
+@on_device
 def rescale_rows_(w, view, row_dims, radius):
     with torch.no_grad():
         w2, aliased = as_2d(w, view, row_dims)
@@ -228,6 +247,7 @@ def rescale_rows_(w, view, row_dims, radius):
         return norms
 
 
+@on_device
 def project_rescale_rows_(w, moments, view, row_dims, radius):
     with torch.no_grad():
         for moment in moments:

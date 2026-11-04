@@ -97,6 +97,7 @@ def measure(name: str, shape: tuple[int, ...], dtype: torch.dtype, backend: str)
 
 
 def main() -> None:
+    torch.cuda.set_device(DEVICE)  # the timing events record on the current device
     load_backends()
     dtype = DTYPES[DTYPE]
     backends = available(ops.UNIT_ROWS, DEVICE)
