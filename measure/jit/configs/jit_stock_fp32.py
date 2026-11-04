@@ -1,4 +1,4 @@
-"""JiT-B/16 on Flowers-102, preset `stock`, fp32, 10k steps at batch 64.
+"""JiT-B/16 (token conditioning) on Flowers-102, preset `stock`, fp32, 10k steps at batch 64.
 RTX 3090, GPU 5. Drives measure/jit/train.py.
 
     kogine workflow parallel measure/jit/train.py \
@@ -6,7 +6,7 @@ RTX 3090, GPU 5. Drives measure/jit/train.py.
 """
 
 DEVICE = "cuda:5"
-EXPERIMENT = "jit_lr"
+EXPERIMENT = "jit_tokens"
 PRESET = "stock"
 PRECISION = "fp32"
 STEPS = 10_000

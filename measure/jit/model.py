@@ -3,11 +3,13 @@ fixed 2D sin-cos positions, 2D RoPE, QK-norm, SwiGLU, adaLN-Zero, 32 in-context 
 block `in_context_start`, x-prediction.
 
 Written as separate linears where the official code fuses them (q / k / v, the SwiGLU gate and
-up, each adaLN chunk); the function is the same.
+up, each adaLN chunk); the function is the same. With `adaln` False (the experiments' shape) the
+time + class embedding is one token in front of the image tokens from block 0 instead of adaLN-Zero,
+so the model has no gates, no modulation and no zero-initialized layer.
 
 | preset | model | patch |
 | --- | --- | --- |
-| `stock` | as published | none |
+| `stock` | RMSNorm with affine, QK-norm with a gain on q and on k | none |
 | `matrices` | `stock` | `suggest(level="matrices")`: unit rows and a channel gain on every layer |
 | `arch` | norms without affine, QK-norm with a gain on q only | `suggest(level="absorb")` and |
 | | | `absorb_plan` |
@@ -137,22 +139,32 @@ def modulate(x, shift, scale):
 
 
 class Block(nn.Module):
-    def __init__(self, shape: Shape, affine: bool, qk_affine: tuple[bool, bool]):
+    """A pre-norm attention and SwiGLU block; with `adaln`, adaLN-Zero modulation and gates."""
+
+    def __init__(self, shape: Shape, affine: bool, qk_affine: tuple[bool, bool], adaln: bool):
         super().__init__()
         self.norm1 = nn.RMSNorm(shape.dim, eps=1e-6, elementwise_affine=affine)
         self.attn = Attention(shape, qk_affine)
         self.norm2 = nn.RMSNorm(shape.dim, eps=1e-6, elementwise_affine=affine)
         self.mlp = SwiGLU(shape.dim, int(shape.dim * 4 * 2 / 3))
-        self.modulation = Modulation(shape.dim, CHUNKS)
+        self.modulation = Modulation(shape.dim, CHUNKS) if adaln else None
         self.stats: dict | None = None
 
     def forward(self, x, c, cos, sin):
-        m = self.modulation(c)
         stats = self.stats
-        attn = self.attn(modulate(self.norm1(x), m["shift_msa"], m["scale_msa"]), cos, sin, stats)
-        x = x + m["gate_msa"] * attn
-        mlp = self.mlp(modulate(self.norm2(x), m["shift_mlp"], m["scale_mlp"]))
-        x = x + m["gate_mlp"] * mlp
+        if self.modulation is None:
+            m = {}
+            attn = self.attn(self.norm1(x), cos, sin, stats)
+            x = x + attn
+            mlp = self.mlp(self.norm2(x))
+            x = x + mlp
+        else:
+            m = self.modulation(c)
+            h = modulate(self.norm1(x), m["shift_msa"], m["scale_msa"])
+            attn = self.attn(h, cos, sin, stats)
+            x = x + m["gate_msa"] * attn
+            mlp = self.mlp(modulate(self.norm2(x), m["shift_mlp"], m["scale_mlp"]))
+            x = x + m["gate_mlp"] * mlp
         if stats is not None:
             with torch.no_grad():
                 f = x.float()
@@ -161,15 +173,22 @@ class Block(nn.Module):
                 stats["channel_max"] = f.square().mean(dim=(0, 1)).sqrt().max()
                 stats["attn_out_rms"] = attn.float().square().mean().sqrt()
                 stats["mlp_out_rms"] = mlp.float().square().mean().sqrt()
-                for name in CHUNKS:
-                    stats[f"{name}_max"] = m[name].float().abs().max()
+                for name, value in m.items():
+                    stats[f"{name}_max"] = value.float().abs().max()
         return x
 
 
 class JiT(nn.Module):
-    def __init__(self, shape: Shape, affine: bool = True, qk_affine=(True, True)):
+    """JiT; `adaln` False conditions by tokens: the time + class embedding is one token in front of
+    the image tokens from block 0, and nothing is zero-initialized."""
+
+    def __init__(
+        self, shape: Shape, affine: bool = True, qk_affine=(True, True), adaln: bool = True
+    ):
         super().__init__()
         self.shape = shape
+        self.adaln = adaln
+        self.prefix = 0 if adaln else 1
         dim = shape.dim
         self.t_embed = nn.Sequential(nn.Linear(256, dim), nn.SiLU(), nn.Linear(dim, dim))
         self.y_embed = nn.Embedding(shape.classes + 1, dim)
@@ -178,13 +197,15 @@ class JiT(nn.Module):
         self.register_buffer("pos", sincos_2d(dim, shape.grid), persistent=False)
         self.in_context_pos = nn.Parameter(torch.randn(shape.in_context, dim) * 0.02)
         head = dim // shape.heads
-        for name, prefix in (("rope", 0), ("rope_ctx", shape.in_context)):
+        for name, prefix in (("rope", self.prefix), ("rope_ctx", self.prefix + shape.in_context)):
             cos, sin = rope_2d(head, shape.grid, prefix)
             self.register_buffer(f"{name}_cos", cos, persistent=False)
             self.register_buffer(f"{name}_sin", sin, persistent=False)
-        self.blocks = nn.ModuleList(Block(shape, affine, qk_affine) for _ in range(shape.depth))
+        self.blocks = nn.ModuleList(
+            Block(shape, affine, qk_affine, adaln) for _ in range(shape.depth)
+        )
         self.norm = nn.RMSNorm(dim, eps=1e-6, elementwise_affine=affine)
-        self.final_modulation = Modulation(dim, ("shift", "scale"))
+        self.final_modulation = Modulation(dim, ("shift", "scale")) if adaln else None
         self.out = nn.Linear(dim, shape.patch * shape.patch * 3)
         self.init_weights()
 
@@ -200,6 +221,8 @@ class JiT(nn.Module):
         nn.init.normal_(self.y_embed.weight, std=0.02)
         nn.init.normal_(self.t_embed[0].weight, std=0.02)
         nn.init.normal_(self.t_embed[2].weight, std=0.02)
+        if not self.adaln:
+            return
         for modulation in [b.modulation for b in self.blocks] + [self.final_modulation]:
             for name in modulation.names:
                 nn.init.zeros_(getattr(modulation, name).weight)
@@ -219,25 +242,29 @@ class JiT(nn.Module):
         y_emb = self.y_embed(y)
         c = self.t_embed(self.time_features(t).to(z.dtype)) + y_emb
         x = self.patch2(self.patch1(z)).flatten(2).transpose(1, 2) + self.pos.to(z.dtype)
+        if not self.adaln:
+            x = torch.cat([c.unsqueeze(1), x], dim=1)
         cos, sin = self.rope_cos.to(z.dtype), self.rope_sin.to(z.dtype)
         for i, block in enumerate(self.blocks):
             if i == s.in_context_start:
-                ctx = y_emb.unsqueeze(1) + self.in_context_pos
-                x = torch.cat([ctx.to(x.dtype), x], dim=1)
+                ctx = (y_emb.unsqueeze(1) + self.in_context_pos).to(x.dtype)
+                x = torch.cat([x[:, : self.prefix], ctx, x[:, self.prefix :]], dim=1)
                 cos, sin = self.rope_ctx_cos.to(z.dtype), self.rope_ctx_sin.to(z.dtype)
             x = block(x, c, cos, sin)
-        x = x[:, s.in_context :]
-        m = self.final_modulation(c)
-        x = self.out(modulate(self.norm(x), m["shift"], m["scale"]))
+        x = self.norm(x[:, self.prefix + s.in_context :])
+        if self.final_modulation is not None:
+            m = self.final_modulation(c)
+            x = modulate(x, m["shift"], m["scale"])
+        x = self.out(x)
         x = x.view(z.shape[0], s.grid, s.grid, s.patch, s.patch, 3)
         return torch.einsum("nhwpqc->nchpwq", x).reshape(z.shape)
 
 
-def build(preset: str, shape: Shape, sample: tuple, device: torch.device):
+def build(preset: str, shape: Shape, sample: tuple, device: torch.device, adaln: bool = False):
     """The model of `preset` on `device`, and its session (None for `stock`); `sample` is one
     (z, t, y) model input for the analysis."""
     arch = preset == "arch"
-    model = JiT(shape, affine=not arch, qk_affine=(True, not arch)).to(device)
+    model = JiT(shape, affine=not arch, qk_affine=(True, not arch), adaln=adaln).to(device)
     match preset:
         case "stock":
             return model, None
