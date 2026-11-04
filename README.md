@@ -50,7 +50,9 @@ output at step 0. Training from scratch works the same way.
 Give every parameter tensor $\theta_i$ a log-scale $s_i$ and look at the model as a function of
 $\theta_i e^{s_i}$. A **free direction** is a vector $s$ along which the output does not change:
 
-$$f(\theta_1 e^{s_1}, \dots, \theta_n e^{s_n}) = f(\theta_1, \dots, \theta_n).$$
+```math
+f(\theta_1 e^{s_1}, \dots, \theta_n e^{s_n}) = f(\theta_1, \dots, \theta_n).
+```
 
 Examples: `up` $\times c$ with `down` $\times 1/c$; `q` $\times c$ with `k` $\times 1/c$; a norm's
 gain $\times c$ with every layer that reads it $\times 1/c$; and any weight followed by a norm on
@@ -59,7 +61,9 @@ its own.
 The loss is constant along a free direction, so its gradient has no component there. For a weight
 $w$ whose scale is free, $\langle \nabla_w L, w\rangle = 0$, and one step $w' = w - \eta g$ gives
 
-$$\lVert w' \rVert^2 = \lVert w \rVert^2 + \eta^2 \lVert g \rVert^2 \ \ge\ \lVert w \rVert^2 .$$
+```math
+\lVert w' \rVert^2 = \lVert w \rVert^2 + \eta^2 \lVert g \rVert^2 \ \ge\ \lVert w \rVert^2 .
+```
 
 The norm can only grow. With Adam every entry moves about $\eta$ per step whatever its gradient,
 so a row of $n$ entries grows like a random walk, and a matrix row moves about $\sqrt{n}$ times
@@ -70,15 +74,18 @@ matrix in it: that is where the drift is fast and the network sees it.
 
 A patched layer uses unit rows times a gain in place of its weight:
 
-$$W_{\text{eff}} = \operatorname{diag}(g)\, r\, \frac{W}{\lVert W \rVert_{\text{row}}}$$
+```math
+W_{\text{eff}} = \mathrm{diag}(g)\, r\, \frac{W}{\lVert W \rVert_{\text{row}}}
+```
 
 with $r$ the row radius (1 for linears and convs, $\sqrt{\text{dim}}$ for embeddings, so their rows
 have unit RMS). The raw row length $\lVert W \rVert_{\text{row}}$ no longer reaches the output, so
 the scale that drifted now lives in $g$: one number per row, moved by a gradient that is aligned
 with the loss instead of by noise. The gradient reaching $W$ is tangent to its rows,
 
-$$\frac{\partial L}{\partial W} = \frac{g\, r}{\lVert W \rVert}\,\bigl(I - \hat w \hat w^\top\bigr)\,
-\frac{\partial L}{\partial W_{\text{eff}}},$$
+```math
+\frac{\partial L}{\partial W} = \frac{g\, r}{\lVert W \rVert}\,\bigl(I - \hat w \hat w^\top\bigr)\, \frac{\partial L}{\partial W_{\text{eff}}},
+```
 
 so the raw rows still grow, slowly, and their growth shrinks the effective step of the direction:
 a per-row $1/\sqrt{t}$ schedule.
