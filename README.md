@@ -279,7 +279,7 @@ config file.
 | `matrices` | `suggest(level="matrices")` on the stock model |
 | `arch` | `suggest(level="absorb")` plus the architecture notes done in the model code (see [How it works](#how-it-works)) |
 
-A run **failed** when it diverged or its best held-out loss stayed above 2.0. `…`: still running.
+A run **failed** when it diverged or its best held-out loss stayed above 2.0.
 
 ### Byte-level LM
 
@@ -333,9 +333,9 @@ C, depth (best held-out loss):
 | matrices | 2e-3 | 0.994 | 0.954 | 0.939 | 0.935 |
 | matrices | 1e-2 | 1.006 | 0.960 | 0.939 | 0.932 |
 | matrices | 5e-2 | 1.110 | 1.147 | 0.991 | failed |
-| arch | 2e-3 | … | … | … | … |
-| arch | 1e-2 | … | … | … | … |
-| arch | 5e-2 | … | … | … | … |
+| arch | 2e-3 | 0.946 | 0.936 | 0.932 | 0.927 |
+| arch | 1e-2 | 0.938 | 0.937 | 0.925 | 0.925 |
+| arch | 5e-2 | 0.943 | 0.953 | 0.938 | 0.925 |
 
 **D: weight decay on stock** (best held-out loss, peak stream).
 
@@ -357,11 +357,11 @@ E, width (best held-out loss):
 | matrices | 1e-2 | 0.977 | 0.967 | 1.121 | 1.187 |
 | matrices | 5e-2 | 0.970 | 1.047 | failed | failed |
 | arch | 2e-3 | 0.970 | 0.938 | 0.932 | 0.953 |
-| arch | 1e-2 | 0.951 | 0.942 | 0.940 | … |
-| arch | 5e-2 | 0.952 | 0.942 | 0.935 | … |
+| arch | 1e-2 | 0.951 | 0.942 | 0.940 | 0.944 |
+| arch | 5e-2 | 0.952 | 0.942 | 0.935 | 0.946 |
 
 Stock's stream grows with width (207, 516, 1,812 at lr 2e-3) and width 1024 diverges at the
-smallest learning rate.
+smallest learning rate. `arch` trains at every depth and width at all three learning rates.
 
 **Loss against stream size**, every run of A–E: the frontier per preset (left) and each setup's
 learning-rate sweep as one line (right).
@@ -397,7 +397,12 @@ model as in stock. Without it, and with the context tokens read-only, the stream
 | matrices | 2e-4 | 0.260 | 710 |
 | matrices | 1e-3 | 0.216 | 1,294 |
 | matrices | 3e-3 | 0.217 | 2,055 |
-| arch | 2e-4 / 1e-3 / 3e-3 | … | … |
+| arch | 2e-4 | 0.234 | 29 |
+| arch | 1e-3 | 0.175 | 28 |
+| arch | 3e-3 | 0.183 | 86 |
+
+Over 10k steps stock's stream peaks at 779 to 23,804, rising with the learning rate; `arch` stays
+at 28 to 86, and its held-out loss is the lowest at every learning rate.
 
 Reproduce, for example:
 
