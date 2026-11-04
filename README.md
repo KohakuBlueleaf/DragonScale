@@ -297,9 +297,10 @@ AdamW, constant learning rate, no weight decay, 5k steps unless stated.
 | matrices | fp16 | 0.954 (5e-3) | 5e-2 |
 | matrices | fp32 | 0.955 (5e-3) | 5e-2 |
 | arch | fp16 | 0.930 (5e-3) | 1.0 |
-| arch | fp32 | 0.936 (0.1) … | 0.2 … |
+| arch | fp32 | 0.936 (0.1) | 1.0 |
 
-fp32 fails where fp16 does: stock at lr 1e-2 and above ends near loss 2.4 with a stream of 1e6
+`arch` trains at every learning rate up to 1.0; past 0.2 its best loss rises (1.05 at 0.5, 1.00
+at 1.0 in fp16). fp32 fails where fp16 does: stock at lr 1e-2 and above ends near loss 2.4 with a stream of 1e6
 to 1e12 in fp32, and diverges in fp16. The precision is not the cause.
 
 **B: longer runs, 16k steps** at lr 2e-3 and 1e-2, fp16.
