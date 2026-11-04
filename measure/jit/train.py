@@ -62,6 +62,8 @@ HELD = 64  # held-out images, each at a fixed noise level spread over (0, 1)
 # ---- execution ----
 DEVICE = "cuda:0"  # nvidia-smi numbering
 ATTENTION = "auto"  # SDPA backend: "efficient" | "flash" | "math" | "auto"
+BACKEND = ""  # kernel backend of the patched layers: "" (fastest) | "triton" | "compile" | "eager"
+COMPILE = False
 LOG_EVERY = 250
 EXPERIMENT = "scratch"  # output folder under runs/jit/
 OUT = ""  # "" = runs/jit/<EXPERIMENT>/<name>.jsonl
@@ -70,7 +72,7 @@ BUILD_CACHE = False  # write data/flowers102/images<IMAGE>.pt and stop
 
 KNOBS = (
     "PRESET LR STEPS WARMUP BATCH BETA2 PRECISION SEED P_MEAN P_STD T_EPS NOISE LABEL_DROP "
-    "CONDITIONING FINAL_NORM IMAGE PATCH DEPTH DIM HEADS HELD ATTENTION LOG_EVERY"
+    "CONDITIONING FINAL_NORM IMAGE PATCH DEPTH DIM HEADS HELD ATTENTION BACKEND COMPILE LOG_EVERY"
 ).split()
 NULL_CLASS = 102
 
@@ -138,7 +140,13 @@ def main() -> None:
     shape = Shape(image=IMAGE, patch=PATCH, depth=DEPTH, dim=DIM, heads=HEADS)
     sample = (images.held_x[:2], images.held_t[:2], images.held_y[:2])
     model, session = build(
-        PRESET, shape, sample, device, adaln=CONDITIONING == "adaln", final_norm=FINAL_NORM
+        PRESET,
+        shape,
+        sample,
+        device,
+        adaln=CONDITIONING == "adaln",
+        final_norm=FINAL_NORM,
+        backend=BACKEND or None,
     )
     optimizer = torch.optim.AdamW(model.parameters(), lr=LR, betas=(0.9, BETA2), weight_decay=0)
     fp16 = PRECISION == "fp16"
@@ -147,6 +155,8 @@ def main() -> None:
 
     def autocast():
         return torch.autocast(device.type, torch.float16, enabled=fp16)
+
+    forward = torch.compile(model) if COMPILE else model
 
     def train_step(step: int) -> torch.Tensor:
         for group in optimizer.param_groups:
@@ -157,7 +167,7 @@ def main() -> None:
         t = torch.sigmoid(torch.randn(BATCH, generator=generator, device=device) * P_STD + P_MEAN)
         noise = torch.randn(x.shape, generator=generator, device=device)
         with autocast():
-            loss = velocity_loss(model, x, y, t, noise)
+            loss = velocity_loss(forward, x, y, t, noise)
         optimizer.zero_grad(set_to_none=True)
         scaler.scale(loss).backward()
         scaler.step(optimizer)

@@ -323,9 +323,11 @@ def build(
     device: torch.device,
     adaln: bool = False,
     final_norm: bool = True,
+    backend: str | None = None,
 ):
     """The model of `preset` on `device`, and its session (None for `stock`); `sample` is one
-    (z, t, y) model input for the analysis."""
+    (z, t, y) model input for the analysis; `backend` pins the kernel backend of the patched
+    layers (None: the fastest available)."""
     arch = preset == "arch"
     model = JiT(
         shape,
@@ -339,7 +341,8 @@ def build(
         case "stock":
             return model, None
         case "matrices":
-            return model, ds.apply(model, ds.analysis.suggest(model, *sample, level="matrices"))
+            plan = ds.analysis.suggest(model, *sample, level="matrices")
+            return model, ds.apply(model, plan, backend=backend)
         case "arch":
             plan = ds.analysis.absorb_plan(
                 model, ds.analysis.suggest(model, *sample, level="absorb"), *sample
@@ -352,5 +355,5 @@ def build(
                     for p in plan
                 )
                 plan = dataclasses.replace(plan, layers=layers)
-            return model, ds.apply(model, plan)
+            return model, ds.apply(model, plan, backend=backend)
     raise ValueError(f"preset {preset!r} not in {PRESETS}")

@@ -51,6 +51,7 @@ BATCH = 64
 DEVICE = "cuda:0"  # nvidia-smi numbering
 ATTENTION = "efficient"  # SDPA backend: "efficient" | "flash" | "math" | "auto"
 COMPILE = False
+BACKEND = ""  # kernel backend of the patched layers: "" (fastest) | "triton" | "compile" | "eager"
 LOG_EVERY = 100
 EXPERIMENT = "scratch"  # output folder under runs/bytelm/
 OUT = ""  # "" = runs/bytelm/<EXPERIMENT>/<name>.jsonl
@@ -59,7 +60,7 @@ BUILD_CORPUS = False  # write data/stdlib.bin and stop
 
 KNOBS = (
     "PRESET LR STEPS WARMUP WEIGHT_DECAY BETA2 PRECISION SEED DEPTH DIM HEADS CONTEXT BATCH "
-    "ATTENTION COMPILE LOG_EVERY"
+    "ATTENTION COMPILE BACKEND LOG_EVERY"
 ).split()
 
 
@@ -119,7 +120,7 @@ def main() -> None:
     torch.manual_seed(SEED)
     batches = Batches(BATCH, CONTEXT, SEED, device)
     shape = Shape(DEPTH, DIM, HEADS, CONTEXT)
-    model, session = build(PRESET, shape, batches.held[0][0], device)
+    model, session = build(PRESET, shape, batches.held[0][0], device, BACKEND or None)
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=LR, betas=(0.9, BETA2), weight_decay=WEIGHT_DECAY
     )

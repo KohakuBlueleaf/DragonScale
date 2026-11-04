@@ -40,7 +40,10 @@ class RowSpec:
     def rows(self, shape: tuple[int, ...]) -> int:
         """Number of rows of a weight of `shape`."""
         view = self.view_of(shape)
-        return math.prod(view[axis] for axis in self.row_dims)
+        rows = 1
+        for axis in self.row_dims:
+            rows *= view[axis]
+        return rows
 
     def fan_in(self, shape: tuple[int, ...]) -> int:
         """Elements per row of a weight of `shape`."""

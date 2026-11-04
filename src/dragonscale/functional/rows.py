@@ -1,8 +1,15 @@
 """Unit-row weights per `RowSpec`: the autograd reference and the kernel-op path.
 
 `gain` is flat `[rows]` (`channel`) or one element (`scalar`), broadcast over every row.
+
+The kernel-op path is an autograd Function in eager mode. Under `torch.compile` it is plain torch
+ops for the default and `compile` backends, which Inductor fuses, and the custom ops
+`dragonscale::unit_rows` / `dragonscale::unit_rows_bwd` for a pinned kernel backend, which trace as
+one opaque op each.
 """
 
+import functools
+import math
 from dataclasses import dataclass
 
 import torch
@@ -96,8 +103,13 @@ class UnitRowOp:
     forward: object
     backward: object
 
+    backend: str | None = None
+
     def __call__(self, w: Tensor, gain: Tensor | None = None) -> Tensor:
-        return UnitRowsFn.apply(w, _gain_rows(gain, self.rows), self)
+        gain = _gain_rows(gain, self.rows)
+        if torch.compiler.is_compiling():
+            return compiled_unit_rows(w, self.view, self.row_dims, self.radius, gain, self.backend)
+        return UnitRowsFn.apply(w, gain, self)
 
 
 class UnitRowsFn(torch.autograd.Function):
@@ -120,6 +132,30 @@ class UnitRowsFn(torch.autograd.Function):
         return grad_w, grad_gain, None
 
 
+def compiled_unit_rows(
+    w: Tensor,
+    view: tuple[int, ...],
+    row_dims: tuple[int, ...],
+    radius: float,
+    gain: Tensor | None,
+    backend: str | None,
+) -> Tensor:
+    """The op under `torch.compile`: plain torch ops for the default and `compile` backends, for
+    Inductor to fuse and differentiate; the opaque custom op for a pinned kernel backend."""
+    if backend in (None, "compile"):
+        v = wide(w).reshape(view)
+        dims = reduced(view, row_dims)
+        norms = v.square().sum(dims, keepdim=True).sqrt() if dims else v.abs()
+        scale = radius / norms.clamp_min(ops.FLOOR)
+        if gain is not None:
+            scale = scale * as_rows(gain.to(v.dtype), view, row_dims)
+        return (v * scale).to(w.dtype).reshape(w.shape)
+    if gain is not None:
+        gain = gain.contiguous()
+    out, _ = unit_rows_op(w, gain, list(view), list(row_dims), radius, backend)
+    return out
+
+
 def unit_row_op(
     spec: RowSpec,
     shape: tuple[int, ...],
@@ -134,7 +170,76 @@ def unit_row_op(
         rows=spec.rows(shape),
         forward=resolve(ops.UNIT_ROWS, device, backend),
         backward=resolve(ops.UNIT_ROWS_BWD, device, backend),
+        backend=backend,
     )
+
+
+@functools.lru_cache(maxsize=None)
+def _bound(op: str, device: torch.device, backend: str):
+    return resolve(op, device, backend or None)
+
+
+def _acc_dtype(t: Tensor) -> torch.dtype:
+    return torch.float64 if t.dtype == torch.float64 else torch.float32
+
+
+@torch.library.custom_op("dragonscale::unit_rows", mutates_args=())
+def unit_rows_op(
+    w: Tensor,
+    gain: Tensor | None,
+    view: list[int],
+    row_dims: list[int],
+    radius: float,
+    backend: str,
+) -> tuple[Tensor, Tensor]:
+    """`unit_rows` of the kernel registry as one op: (out, norms)."""
+    fn = _bound(ops.UNIT_ROWS, w.device, backend)
+    out, norms = fn(w, tuple(view), tuple(row_dims), gain, radius)
+    return out.clone() if out is w else out, norms
+
+
+@unit_rows_op.register_fake
+def _(w, gain, view, row_dims, radius, backend):
+    rows = math.prod(view[d] for d in row_dims)
+    return torch.empty_like(w), w.new_empty(rows, dtype=_acc_dtype(w))
+
+
+@torch.library.custom_op("dragonscale::unit_rows_bwd", mutates_args=())
+def unit_rows_bwd_op(
+    grad: Tensor,
+    w: Tensor,
+    norms: Tensor,
+    gain: Tensor | None,
+    view: list[int],
+    row_dims: list[int],
+    radius: float,
+    backend: str,
+) -> tuple[Tensor, Tensor]:
+    """`unit_rows_bwd` as one op: (grad_w, grad_gain); grad_gain is empty without a gain."""
+    fn = _bound(ops.UNIT_ROWS_BWD, w.device, backend)
+    grad_w, grad_gain = fn(grad.contiguous(), w, tuple(view), tuple(row_dims), norms, gain, radius)
+    return grad_w, grad_gain if grad_gain is not None else w.new_empty(0)
+
+
+@unit_rows_bwd_op.register_fake
+def _(grad, w, norms, gain, view, row_dims, radius, backend):
+    return torch.empty_like(w), (torch.empty_like(gain) if gain is not None else w.new_empty(0))
+
+
+def _setup(ctx, inputs, output):
+    w, gain, view, row_dims, radius, backend = inputs
+    ctx.save_for_backward(w, output[1], gain)
+    ctx.spec = (view, row_dims, radius, backend)
+
+
+def _backward(ctx, grad_out, grad_norms):
+    w, norms, gain = ctx.saved_tensors
+    view, row_dims, radius, backend = ctx.spec
+    grad_w, grad_gain = unit_rows_bwd_op(grad_out, w, norms, gain, view, row_dims, radius, backend)
+    return grad_w, (grad_gain if gain is not None else None), None, None, None, None
+
+
+unit_rows_op.register_autograd(_backward, setup_context=_setup)
 
 
 _OPS: dict[tuple, UnitRowOp] = {}

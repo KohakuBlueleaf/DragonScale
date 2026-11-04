@@ -9,6 +9,7 @@ from torch.nn.utils import parametrize
 
 from dragonscale.functional.rows import (
     UnitRowOp,
+    compiled_unit_rows,
     fill_zero_rows_,
     gain_scaled,
     preserving_gain,
@@ -155,6 +156,18 @@ class PatchedLayer:
         """The weight the layer computes with, from a raw weight and a gain, per method."""
         if self.plan.method == "rescale":
             return gain_scaled(raw, self.plan.spec, gain)
+        if torch.compiler.is_compiling():
+            spec, shape = self.plan.spec, raw.shape
+            if gain is not None and gain.numel() != spec.rows(shape):
+                gain = gain.reshape(1).expand(spec.rows(shape))
+            return compiled_unit_rows(
+                raw,
+                spec.view_of(shape),
+                tuple(spec.row_dims),
+                spec.radius_of(shape),
+                gain,
+                self.backend,
+            )
         return self.unit_row_op(raw)(raw, gain)
 
     def unit_weight(self) -> Tensor:

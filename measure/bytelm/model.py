@@ -118,15 +118,23 @@ class LM(nn.Module):
         return self.head(self.norm(x) if self.norm is not None else x)
 
 
-def build(preset: str, shape: Shape, sample: torch.Tensor, device: torch.device):
-    """The model of `preset` on `device`, and its session (None for `stock`)."""
+def build(
+    preset: str,
+    shape: Shape,
+    sample: torch.Tensor,
+    device: torch.device,
+    backend: str | None = None,
+):
+    """The model of `preset` on `device`, and its session (None for `stock`); `backend` pins the
+    kernel backend of the patched layers (None: the fastest available)."""
     arch = preset == "arch"
     model = LM(shape, affine=not arch, qk_norm=arch, final_norm=not arch).to(device)
     match preset:
         case "stock":
             return model, None
         case "matrices":
-            return model, ds.apply(model, ds.analysis.suggest(model, sample, level="matrices"))
+            plan = ds.analysis.suggest(model, sample, level="matrices")
+            return model, ds.apply(model, plan, backend=backend)
         case "arch":
             plan = ds.analysis.suggest(model, sample, level="absorb")
             plan = ds.analysis.absorb_plan(model, plan, sample)
@@ -138,5 +146,5 @@ def build(preset: str, shape: Shape, sample: torch.Tensor, device: torch.device)
                 )
                 for p in plan
             )
-            return model, ds.apply(model, dataclasses.replace(plan, layers=layers))
+            return model, ds.apply(model, dataclasses.replace(plan, layers=layers), backend=backend)
     raise ValueError(f"preset {preset!r} not in {PRESETS}")
