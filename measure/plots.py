@@ -766,17 +766,18 @@ def _block(ax, y0, lower, upper, lower_fill, upper_fill, lower_w, upper_w, add_t
     return y0, y1
 
 
-def _rows(ax, y, lengths, color, gains=None, gain_color=None, label=None):
+def _rows(ax, y, lengths, color, gains=None, gain_color=None, label=None, x=None):
     """A weight as its rows: one bar per row, its length the row's norm; with `gains`, a gain
     column to the right."""
     n, h, w = len(lengths), 1.25, 1.35
+    x0 = GLYPH_X if x is None else x
     for i, length in enumerate(lengths):
         yi = y + h / 2 - (i + 0.5) * h / n
-        ax.add_patch(plt.Rectangle((GLYPH_X, yi - 0.4 * h / n), length * w, 0.8 * h / n, fc=color,
+        ax.add_patch(plt.Rectangle((x0, yi - 0.4 * h / n), length * w, 0.8 * h / n, fc=color,
                                    ec="none", zorder=3))  # fmt: skip
-    ax.plot([GLYPH_X, GLYPH_X], [y - h / 2, y + h / 2], color="0.3", lw=1, zorder=4)
+    ax.plot([x0, x0], [y - h / 2, y + h / 2], color="0.3", lw=1, zorder=4)
     if gains is not None:
-        gx = GLYPH_X + w + 0.35
+        gx = x0 + w + 0.35
         for i, g in enumerate(gains):
             yi = y + h / 2 - (i + 0.5) * h / n
             ax.add_patch(plt.Rectangle((gx, yi - 0.4 * h / n), g * 0.9, 0.8 * h / n,
@@ -785,7 +786,7 @@ def _rows(ax, y, lengths, color, gains=None, gain_color=None, label=None):
         ax.text(gx + 0.45, y + h / 2 + 0.25, "$g$", ha="center", fontsize=TEASER_FONT,
                 color=gain_color)  # fmt: skip
     if label:
-        ax.text(GLYPH_X, y - h / 2 - 0.15, label, ha="left", va="top", fontsize=TEASER_FONT - 1,
+        ax.text(x0, y - h / 2 - 0.15, label, ha="left", va="top", fontsize=TEASER_FONT - 1,
                 color=color)  # fmt: skip
 
 
@@ -813,6 +814,7 @@ def _stream(ax, y_from, y_to, label, color, grow=False):
 
 UNEVEN = [0.55, 1.0, 0.3, 0.85, 0.65]
 EVEN = [0.7] * 5
+SHRINKING = [0.4, 0.25, 0.35, 0.2, 0.3]
 GAINS = [0.35, 0.8, 0.5, 0.2, 0.6]
 
 
@@ -820,17 +822,18 @@ def _teaser_stock(ax) -> None:
     fill, norm = "#F6DCCB", "#FBEDE4"
     _diagram_axes(ax, "pre-norm transformer", RED, "free scales drift with noise")
     _box(ax, STREAM_X, 0.3, "embedding", fill, w=3.3, h=0.9)
-    _stream(ax, 0.75, TOP_Y - 0.45, r"stream $x$,   $\Vert x\Vert\uparrow$", RED, grow=True)
+    _stream(ax, 0.75, HEAD_Y - 0.45, r"stream $x$,   $\Vert x\Vert\uparrow$", RED, grow=True)
     _, attn = _block(ax, ATTN_Y, r"RMSNorm$\cdot\gamma$", r"$W_{qkv}\to$ attn" "\n" r"$\to W_o$", norm,
                      fill, NARROW_W, WIDE_W)  # fmt: skip
     _, mlp = _block(ax, MLP_Y, r"RMSNorm$\cdot\gamma$", r"$W_{up}\to$ SiLU" "\n" r"$\to W_{down}$",
                     norm, fill, NARROW_W, WIDE_W)  # fmt: skip
-    _box(ax, STREAM_X, TOP_Y, r"RMSNorm$\cdot\gamma$", norm, w=3.5, h=0.9)
-    _arrow(ax, (STREAM_X, TOP_Y + 0.45), (STREAM_X, HEAD_Y - 0.45))
     _box(ax, STREAM_X, HEAD_Y, r"head $W$", fill, w=2.4, h=0.9)
+    _rows(ax, HEAD_Y, SHRINKING, RED, x=3.45)
     _rows(ax, attn, UNEVEN, RED, label=r"$\gamma c,W/c$;  $W_q c,W_k/c$")
     _rows(ax, mlp, UNEVEN, RED, label=r"$W_{up}\,c,\ W_{down}/c$")
-    _note(ax, 3.85, TOP_Y, r"$x\,c$ is free:" "\n" "the norm hides it", RED)
+    _note(ax, 4.4, HEAD_Y, r"$x\,c\uparrow,\ \ W_{head}/c\downarrow$", RED)
+    _note(ax, 3.45, TOP_Y - 0.15, "a final norm makes it worse:\nthe stream's scale is then\nfully free",
+          RED, TEASER_FONT - 2)  # fmt: skip
 
 
 def _teaser_fixed(ax) -> None:
