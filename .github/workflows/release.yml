@@ -127,9 +127,15 @@ jobs:
             flag="--prerelease"
           fi
           python scripts/ci/release_notes.py --version "${version}" > notes.md
+          # A nightly has no tag yet: push it with git, so the release call never creates a ref
+          # (the API refused that to this token with HTTP 403)
+          if ! git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null; then
+            git tag "${tag}" "$(git rev-parse HEAD)"
+            git push origin "refs/tags/${tag}"
+          fi
           if ! gh release view "${tag}" >/dev/null 2>&1; then
             gh release create "${tag}" --title "DragonScale ${version}" \
-              --notes-file notes.md ${flag} --target "$(git rev-parse HEAD)"
+              --notes-file notes.md ${flag} --verify-tag
           else
             gh release edit "${tag}" --title "DragonScale ${version}" \
               --notes-file notes.md ${flag}
