@@ -1,0 +1,54 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dragonscale"
+version = "0.0.1"
+description = "Keeps weight sizes from drifting during training: finds the scales a model's loss cannot see and normalizes the weights behind them."
+authors = [
+    { name = "Shih-Ying Yeh(KohakuBlueLeaf)", email = "apolloyeh0123@gmail.com" },
+]
+license = { text = "Apache-2.0" }
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = ["torch>=2.9"]
+keywords = ["pytorch", "weight-normalization", "training-stability", "triton"]
+classifiers = [
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+[project.optional-dependencies]
+triton = ["triton>=3.7"]
+tilelang = ["tilelang"]
+hf = ["transformers"]
+dev = ["pytest", "ruff", "black", "matplotlib", "kohaku-engine"]
+measure = ["transformers", "matplotlib", "kohaku-engine"]
+
+[project.urls]
+Homepage = "https://github.com/KohakuBlueleaf/DragonScale"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["dragonscale*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B"]
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["dragonscale", "dragonscale_common", "dragonscale_kernels"]

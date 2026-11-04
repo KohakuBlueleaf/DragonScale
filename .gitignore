@@ -1,0 +1,19 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+.ruff_cache/
+/build/
+/dist/
+
+# Private notes, plans and live state
+.internal/
+CLAUDE.local.md
+STATE.md
+
+/runs/
+*.safetensors
+*.pt
+*.ckpt
+/data/
