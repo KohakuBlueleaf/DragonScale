@@ -12,7 +12,8 @@ so the model has no gates, no modulation and no zero-initialized layer.
 | `stock` | RMSNorm with affine, QK-norm with a gain on q and on k | none |
 | `matrices` | `stock` | `suggest(level="matrices")`: unit rows and a channel gain on every layer |
 | `arch` | norms without affine, QK-norm with a gain on q only | `suggest(level="absorb")` and |
-| | | `absorb_plan`; without the final norm the output layer has unit rows and no gain |
+| | | `absorb_plan`; without the final norm, every input enters through a norm without affine, |
+| | | and the layers right before those norms and the output layer have unit rows, no gain |
 """
 
 import dataclasses
@@ -191,7 +192,9 @@ class Block(nn.Module):
 class JiT(nn.Module):
     """JiT; `adaln` False conditions by tokens: the time + class embedding is one token in front of
     the image tokens from block 0, and nothing is zero-initialized. `final_norm` False lets the
-    output layer read the residual stream directly."""
+    output layer read the residual stream directly. `input_norm` puts every entry into the stream
+    (the image tokens, the conditioning token, the in-context tokens) through a norm without affine,
+    so each enters at a fixed scale; the layers right before those norms then carry no bias."""
 
     def __init__(
         self,
@@ -200,18 +203,22 @@ class JiT(nn.Module):
         qk_affine=(True, True),
         adaln: bool = True,
         final_norm: bool = True,
+        input_norm: bool = False,
     ):
         super().__init__()
         self.shape = shape
         self.adaln = adaln
         self.prefix = 0 if adaln else 1
         dim = shape.dim
-        self.t_embed = nn.Sequential(nn.Linear(256, dim), nn.SiLU(), nn.Linear(dim, dim))
+        entry_bias = not input_norm
+        self.t_embed = nn.Sequential(
+            nn.Linear(256, dim), nn.SiLU(), nn.Linear(dim, dim, bias=entry_bias)
+        )
         self.y_embed = nn.Embedding(shape.classes + 1, dim)
         self.patch1 = nn.Conv2d(3, shape.bottleneck, shape.patch, shape.patch, bias=False)
-        self.patch2 = nn.Conv2d(shape.bottleneck, dim, 1)
+        self.patch2 = nn.Conv2d(shape.bottleneck, dim, 1, bias=entry_bias)
         self.register_buffer("pos", sincos_2d(dim, shape.grid), persistent=False)
-        self.in_context_pos = nn.Parameter(torch.randn(shape.in_context, dim) * 0.02)
+        self.in_context_pos = nn.Embedding(shape.in_context, dim)
         head = dim // shape.heads
         for name, prefix in (("rope", self.prefix), ("rope_ctx", self.prefix + shape.in_context)):
             cos, sin = rope_2d(head, shape.grid, prefix)
@@ -221,6 +228,9 @@ class JiT(nn.Module):
             Block(shape, affine, qk_affine, adaln) for _ in range(shape.depth)
         )
         self.norm = nn.RMSNorm(dim, eps=1e-6, elementwise_affine=affine) if final_norm else None
+        self.input_norm = (
+            nn.RMSNorm(dim, eps=1e-6, elementwise_affine=False) if input_norm else None
+        )
         self.final_modulation = Modulation(dim, ("shift", "scale")) if adaln else None
         self.out = nn.Linear(dim, shape.patch * shape.patch * 3)
         self.init_weights()
@@ -230,11 +240,14 @@ class JiT(nn.Module):
         for module in self.modules():
             if isinstance(module, nn.Linear):
                 nn.init.xavier_uniform_(module.weight)
-                nn.init.zeros_(module.bias)
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
         for conv in (self.patch1, self.patch2):
             nn.init.xavier_uniform_(conv.weight.view(conv.weight.shape[0], -1))
-        nn.init.zeros_(self.patch2.bias)
+        if self.patch2.bias is not None:
+            nn.init.zeros_(self.patch2.bias)
         nn.init.normal_(self.y_embed.weight, std=0.02)
+        nn.init.normal_(self.in_context_pos.weight, std=0.02)
         nn.init.normal_(self.t_embed[0].weight, std=0.02)
         nn.init.normal_(self.t_embed[2].weight, std=0.02)
         if not self.adaln:
@@ -258,13 +271,17 @@ class JiT(nn.Module):
         y_emb = self.y_embed(y)
         c = self.t_embed(self.time_features(t).to(z.dtype)) + y_emb
         x = self.patch2(self.patch1(z)).flatten(2).transpose(1, 2) + self.pos.to(z.dtype)
+        enter = self.input_norm if self.input_norm is not None else (lambda v: v)
+        x = enter(x)
         if not self.adaln:
+            c = enter(c)
             x = torch.cat([c.unsqueeze(1), x], dim=1)
         cos, sin = self.rope_cos.to(z.dtype), self.rope_sin.to(z.dtype)
         prefix = self.prefix
         for i, block in enumerate(self.blocks):
             if i == s.in_context_start:
-                ctx = (y_emb.unsqueeze(1) + self.in_context_pos).to(x.dtype)
+                positions = torch.arange(s.in_context, device=z.device)
+                ctx = enter(y_emb.unsqueeze(1) + self.in_context_pos(positions)).to(x.dtype)
                 x = torch.cat([x[:, : self.prefix], ctx, x[:, self.prefix :]], dim=1)
                 cos, sin = self.rope_ctx_cos.to(z.dtype), self.rope_ctx_sin.to(z.dtype)
                 prefix = self.prefix + s.in_context
@@ -293,7 +310,12 @@ def build(
     (z, t, y) model input for the analysis."""
     arch = preset == "arch"
     model = JiT(
-        shape, affine=not arch, qk_affine=(True, not arch), adaln=adaln, final_norm=final_norm
+        shape,
+        affine=not arch,
+        qk_affine=(True, not arch),
+        adaln=adaln,
+        final_norm=final_norm,
+        input_norm=arch and not final_norm,
     ).to(device)
     match preset:
         case "stock":
@@ -305,9 +327,10 @@ def build(
                 model, ds.analysis.suggest(model, *sample, level="absorb"), *sample
             )
             if not final_norm:
-                # The stream's scale reaches the output; the output layer keeps no gain of its own
+                # The output layer and the layers right before the input norms keep no gain
+                fixed = ("out", "patch2", "t_embed.2", "y_embed", "in_context_pos")
                 layers = tuple(
-                    dataclasses.replace(p, mode="unit", init="ones") if p.path == "out" else p
+                    dataclasses.replace(p, mode="unit", init="ones") if p.path in fixed else p
                     for p in plan
                 )
                 plan = dataclasses.replace(plan, layers=layers)
