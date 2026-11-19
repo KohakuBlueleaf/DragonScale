@@ -19,8 +19,8 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install black ruff
-      - run: black --check src tests scripts measure
-      - run: ruff check src tests scripts measure
+      - run: black --check src tests scripts measure docs
+      - run: ruff check src tests scripts measure docs
 
   # No GPU on the runners: the CPU half of the tests (CUDA tests skip), and each module imported
   # in its own interpreter, which is where an import cycle shows up.

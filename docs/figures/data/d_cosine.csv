@@ -1,0 +1,61 @@
+model,quantity,lr,seeds,trained,nonfinite,ok,median,low,high
+standard,stream,0.0001,5,5,0,1,1.80467,1.75567,1.87111
+standard,stream,0.000316228,5,5,0,1,1.73912,1.68942,1.74871
+standard,stream,0.001,5,5,0,1,2.71161,2.64502,2.91172
+standard,stream,0.00316228,5,5,0,1,6.58388,6.35044,6.92158
+standard,stream,0.01,5,5,0,1,36.3461,32.3357,37.8842
+standard,stream,0.0316228,5,5,0,1,37415,29948.3,52801.2
+standard,stream,0.1,5,5,0,1,2.96061e+07,2.37413e+07,4.82992e+07
+standard,stream,0.316228,5,5,0,1,1.28185e+09,7.64791e+08,1.5567e+09
+standard,stream,1,5,5,0,1,1.03901e+12,2.42401e+11,1.32667e+12
+standard,stream,3.16228,5,5,0,1,1.79263e+14,9.49919e+13,3.04542e+14
+standard,held_loss,0.0001,5,5,0,1,2.30632,2.28674,2.31793
+standard,held_loss,0.000316228,5,5,0,1,2.01149,2.00133,2.05688
+standard,held_loss,0.001,5,5,0,1,1.73729,1.69215,1.75182
+standard,held_loss,0.00316228,5,5,0,1,1.55681,1.54734,1.57097
+standard,held_loss,0.01,5,5,0,1,1.55619,1.54494,1.56505
+standard,held_loss,0.0316228,5,5,0,1,1.96088,1.83332,1.99667
+standard,held_loss,0.1,5,5,0,1,2.64299,2.60663,2.77559
+standard,held_loss,0.316228,5,5,0,1,2.84681,2.80844,2.92737
+standard,held_loss,1,5,5,0,1,2.83965,2.82263,2.92007
+standard,held_loss,3.16228,5,5,0,1,2.89071,2.88231,2.92856
+unit rows with gains,stream,0.0001,5,5,0,1,3.37004,3.19454,3.41594
+unit rows with gains,stream,0.000316228,5,5,0,1,2.38732,2.32284,2.43454
+unit rows with gains,stream,0.001,5,5,0,1,2.41061,2.30117,2.43522
+unit rows with gains,stream,0.00316228,5,5,0,1,3.31378,3.21348,3.45056
+unit rows with gains,stream,0.01,5,5,0,1,4.52111,4.50547,4.94929
+unit rows with gains,stream,0.0316228,5,5,0,1,6.0067,5.75088,6.39515
+unit rows with gains,stream,0.1,5,5,0,1,8.99334,8.67638,9.9359
+unit rows with gains,stream,0.316228,5,5,0,1,42.8005,28.649,53.7752
+unit rows with gains,stream,1,5,5,0,1,1372.58,490.694,1594.23
+unit rows with gains,stream,3.16228,5,5,0,1,49641.9,19030.1,63510.7
+unit rows with gains,held_loss,0.0001,5,5,0,1,2.35752,2.3449,2.36039
+unit rows with gains,held_loss,0.000316228,5,5,0,1,1.99651,1.9689,2.03212
+unit rows with gains,held_loss,0.001,5,5,0,1,1.64952,1.63309,1.67159
+unit rows with gains,held_loss,0.00316228,5,5,0,1,1.52256,1.51112,1.54132
+unit rows with gains,held_loss,0.01,5,5,0,1,1.50116,1.48865,1.51791
+unit rows with gains,held_loss,0.0316228,5,5,0,1,1.51214,1.50642,1.52463
+unit rows with gains,held_loss,0.1,5,5,0,1,1.51675,1.50077,1.53171
+unit rows with gains,held_loss,0.316228,5,5,0,1,1.54004,1.52384,1.5626
+unit rows with gains,held_loss,1,5,5,0,1,1.58768,1.57706,1.62573
+unit rows with gains,held_loss,3.16228,5,5,0,1,2.10525,2.07621,2.14433
+"unit rows, no gains",stream,0.0001,5,5,0,1,3.8142,3.77831,3.9003
+"unit rows, no gains",stream,0.000316228,5,5,0,1,2.75027,2.62172,2.79317
+"unit rows, no gains",stream,0.001,5,5,0,1,2.4212,2.37652,2.45778
+"unit rows, no gains",stream,0.00316228,5,5,0,1,2.4225,2.40561,2.51896
+"unit rows, no gains",stream,0.01,5,5,0,1,2.51089,2.46232,2.53861
+"unit rows, no gains",stream,0.0316228,5,5,0,1,2.52027,2.4387,2.54154
+"unit rows, no gains",stream,0.1,5,5,0,1,2.46194,2.33703,2.50531
+"unit rows, no gains",stream,0.316228,5,5,0,1,2.4642,2.35722,2.5854
+"unit rows, no gains",stream,1,5,5,0,1,2.36,2.23714,2.44451
+"unit rows, no gains",stream,3.16228,5,5,0,1,4.84399,2.23848,5.46394
+"unit rows, no gains",held_loss,0.0001,5,5,0,1,2.32017,2.30043,2.32754
+"unit rows, no gains",held_loss,0.000316228,5,5,0,1,1.94459,1.93516,1.99149
+"unit rows, no gains",held_loss,0.001,5,5,0,1,1.61609,1.61185,1.64714
+"unit rows, no gains",held_loss,0.00316228,5,5,0,1,1.51983,1.51802,1.5266
+"unit rows, no gains",held_loss,0.01,5,5,0,1,1.49932,1.49598,1.51687
+"unit rows, no gains",held_loss,0.0316228,5,5,0,1,1.50884,1.49321,1.51334
+"unit rows, no gains",held_loss,0.1,5,5,0,1,1.51109,1.49089,1.55142
+"unit rows, no gains",held_loss,0.316228,5,5,0,1,1.53096,1.51223,1.54735
+"unit rows, no gains",held_loss,1,5,5,0,1,1.57328,1.54831,1.57834
+"unit rows, no gains",held_loss,3.16228,5,5,0,1,2.03852,1.58816,2.08352
