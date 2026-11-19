@@ -9,7 +9,7 @@ scaled side only as long as the fixed term is not negligible next to it.
 """
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 from torch import Tensor
@@ -26,9 +26,14 @@ class Call:
     kwargs: dict
     zero: Tensor
     degree_of: Callable[[Tensor], Tensor]
+    zeros: set[int] = field(default_factory=set)
 
     def deg(self, value) -> Tensor:
         return self.degree_of(value) if isinstance(value, Tensor) else self.zero
+
+    def exact_zero(self, value) -> bool:
+        """Whether `value` is a tensor known to be exactly zero (any scale fits it)."""
+        return isinstance(value, Tensor) and id(value) in self.zeros
 
     def tensors(self) -> list[Tensor]:
         """Every floating tensor among the positional arguments and lists of them."""
@@ -91,6 +96,8 @@ def additive(call: Call):
     epsilon) anchors the other: the output carries the scaled side's degree and the constraint is
     an `Anchor`."""
     a, b = call.arg(0), call.arg(1, "other")
+    if call.exact_zero(a) or call.exact_zero(b):
+        return call.deg(b if call.exact_zero(a) else a), []
     if isinstance(a, Tensor) and isinstance(b, Tensor):
         da, db = call.deg(a), call.deg(b)
         if is_zero(da) != is_zero(db):
@@ -187,14 +194,18 @@ def scaled(factor: float) -> DegreeRule:
 
 
 def concatenate(call: Call):
-    """Every piece must move together (cat, stack)."""
-    pieces = [t for t in call.args[0] if isinstance(t, Tensor)]
+    """Every piece must move together (cat, stack); an exactly-zero piece fits any scale."""
+    pieces = [t for t in call.args[0] if isinstance(t, Tensor) and not call.exact_zero(t)]
+    if not pieces:
+        return call.zero, []
     first = call.deg(pieces[0])
     return first, [call.deg(t) - first for t in pieces[1:]]
 
 
 def select_where(call: Call):
     a, b = call.arg(1), call.arg(2)
+    if call.exact_zero(a) or call.exact_zero(b):
+        return call.deg(b if call.exact_zero(a) else a), []
     if isinstance(a, Tensor) and isinstance(b, Tensor):
         return call.deg(a), [call.deg(a) - call.deg(b)]
     tensor = a if isinstance(a, Tensor) else b
@@ -270,6 +281,7 @@ CONSTANT = (
     "empty_strided", "new_empty_strided", "randint", "randint_like", "randperm", "bernoulli",
     "_local_scalar_dense", "full_like", "logspace", "normal_", "uniform_",
 )  # fmt: skip
+ZEROS = ("zeros", "zeros_like", "new_zeros", "zero")  # ops whose output is exactly zero
 ATTENTION = (
     "_scaled_dot_product_flash_attention", "_scaled_dot_product_flash_attention_for_cpu",
     "_scaled_dot_product_efficient_attention", "_scaled_dot_product_cudnn_attention",

@@ -14,8 +14,18 @@ from torch import Tensor, nn
 from torch.utils._python_dispatch import TorchDispatchMode
 from torch.utils._pytree import tree_leaves
 
-from dragonscale.analysis.rules import ATTENTION, Anchor, Call, nonlinear, rule_of, zero_like
+from dragonscale.analysis.rules import (
+    ATTENTION,
+    ZEROS,
+    Anchor,
+    Call,
+    nonlinear,
+    passthrough,
+    rule_of,
+    zero_like,
+)
 from dragonscale.functional.rows import plain_unit_rows
+from dragonscale.layer_types import layer_type_of
 
 ATTENTION_OPS = {f"aten::{name}" for name in ATTENTION}
 
@@ -24,8 +34,11 @@ ATTENTION_OPS = {f"aten::{name}" for name in ATTENTION}
 class DegreeTrace:
     """What one forward gave: groups, constraints, anchors (constraints set by a fixed-scale
     addend), the degrees of data-dependent tensors, the degree of each module's first input
-    (`module_inputs`, by path, in first-call order), and the q and k degrees of every attention
-    call (`attention`). A source is the module path and op that set the constraint."""
+    (`module_inputs`, by path, in first-call order), the q and k degrees of every attention
+    call (`attention`), and the modules whose first input depends on no parameter (`entries`:
+    an embedding lookup, a patch embedding of the input), and the modules with a layer type whose
+    output reaches a model output through view and layout ops only (`outputs`). A source is the module path and op that set the constraint.
+    """
 
     names: list[str]
     shapes: list[tuple[int, ...]]
@@ -37,6 +50,8 @@ class DegreeTrace:
     unknown: Counter = field(default_factory=Counter)
     module_inputs: dict[str, Tensor] = field(default_factory=dict)
     attention: list[tuple[Tensor, Tensor]] = field(default_factory=list)
+    entries: set[str] = field(default_factory=set)
+    outputs: set[str] = field(default_factory=set)
 
     def matrix(self) -> Tensor:
         """The stacked constraints, `[constraints, groups]` (one zero row when there is none)."""
@@ -63,6 +78,9 @@ class _DegreeRecorder(TorchDispatchMode):
         self.zero = zero_like(len(params))
         self.degree: dict[int, Tensor] = {}
         self.data: set[int] = set()
+        self.touched: set[int] = {id(p) for p in params}
+        self.zeros: set[int] = set()  # tensors known to be exactly zero: any degree fits them
+        self.source: dict[int, str] = {}  # tensor -> the layer whose output it is a view of
         self.alive: list[Tensor] = []
         self.paths: list[str] = []
         for k, param in enumerate(params):
@@ -99,7 +117,7 @@ class _DegreeRecorder(TorchDispatchMode):
             return out
 
         # Degrees of the outputs and the op's constraints
-        call = Call(name, tuple(args), kwargs, self.zero, self.degree_of)
+        call = Call(name, tuple(args), kwargs, self.zero, self.degree_of, self.zeros)
         if name in ATTENTION_OPS:
             self.trace.attention.append((call.deg(args[0]), call.deg(args[1])))
         rule = rule_of(name)
@@ -107,16 +125,29 @@ class _DegreeRecorder(TorchDispatchMode):
             self.trace.unknown[name] += 1
             rule = nonlinear
         degrees, constraints = rule(call)
+
+        # Exact zeros and layer outputs pass through views and layout ops
+        first = next((t for t in inputs), None)
+        if name.removeprefix("aten::").rstrip("_") in ZEROS or (
+            rule is passthrough and first is not None and id(first) in self.zeros
+        ):
+            self.zeros.update(id(t) for t in outputs)
+        if rule is passthrough and first is not None and id(first) in self.source:
+            for t in outputs:
+                self.source[id(t)] = self.source[id(first)]
         for vector in constraints:
             self.constrain(vector, name)
         degrees = degrees if isinstance(degrees, list) else [degrees] * len(outputs)
 
-        # Record them; data dependence flows from any input
+        # Record them; data and parameter dependence flow from any input
         dependent = any(id(t) in self.data for t in inputs)
+        touched = any(id(t) in self.touched for t in inputs)
         for tensor, degree in zip(outputs, degrees, strict=False):
             self.alive.append(tensor)
             if dependent:
                 self.data.add(id(tensor))
+            if touched:
+                self.touched.add(id(tensor))
             if not tensor.is_floating_point():
                 continue
             self.degree[id(tensor)] = degree
@@ -147,13 +178,19 @@ def trace_degrees(model: nn.Module, *inputs, **kwargs) -> DegreeTrace:
     def enter(path: str):
         def hook(module: nn.Module, args) -> None:
             recorder.paths.append(path)
-            if args and isinstance(args[0], Tensor):
-                result.module_inputs.setdefault(path, recorder.degree_of(args[0]))
+            if args and isinstance(args[0], Tensor) and path not in result.module_inputs:
+                result.module_inputs[path] = recorder.degree_of(args[0])
+                if id(args[0]) not in recorder.touched:
+                    result.entries.add(path)
 
         return hook
 
     def leave(module: nn.Module, args, out) -> None:
-        recorder.paths.pop()
+        path = recorder.paths.pop()
+        if layer_type_of(module) is not None:
+            for t in tree_leaves(out):
+                if isinstance(t, Tensor):
+                    recorder.source[id(t)] = path
 
     handles = []
     for path, module in model.named_modules():
@@ -170,4 +207,6 @@ def trace_degrees(model: nn.Module, *inputs, **kwargs) -> DegreeTrace:
     for tensor in tree_leaves(out):
         if isinstance(tensor, Tensor) and tensor.is_floating_point():
             recorder.constrain(recorder.degree_of(tensor), "output")
+            if id(tensor) in recorder.source:
+                result.outputs.add(recorder.source[id(tensor)])
     return result

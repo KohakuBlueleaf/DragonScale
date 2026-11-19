@@ -1,4 +1,5 @@
-"""Direct-use modules: stock layers whose weight is read through unit rows, and `Gain`."""
+"""Direct-use modules: stock layers whose weight is read through unit rows, `Gain`, and
+`QKNorm`."""
 
 from dragonscale.nn.gain import Gain
 from dragonscale.nn.layers import (
@@ -12,9 +13,11 @@ from dragonscale.nn.layers import (
     UnitRowLinear,
     UnitRows,
 )
+from dragonscale.nn.qk_norm import QKNorm
 
 __all__ = [
     "Gain",
+    "QKNorm",
     "UnitRowConv1d",
     "UnitRowConv2d",
     "UnitRowConv3d",

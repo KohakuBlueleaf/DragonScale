@@ -39,11 +39,13 @@ class LayerPlan:
 @dataclass(frozen=True)
 class Plan:
     """Every layer plan of one model, in module order, and the scale moves to make before it
-    is applied (`moves`: source path and consumer paths, run by `ds.analysis.absorb_plan`).
-    An empty plan changes nothing."""
+    is applied (`moves`: source path and consumer paths, run by `ds.analysis.absorb_plan`), and
+    what the analysis found that the plan cannot change (`notes`). An empty plan changes
+    nothing."""
 
     layers: tuple[LayerPlan, ...] = field(default_factory=tuple)
     moves: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    notes: tuple[str, ...] = ()
 
     def __len__(self) -> int:
         return len(self.layers)
@@ -55,13 +57,14 @@ class Plan:
         return {
             "layers": [layer.to_dict() for layer in self.layers],
             "moves": [[source, list(into)] for source, into in self.moves],
+            "notes": list(self.notes),
         }
 
     @classmethod
     def from_dict(cls, data: dict) -> Self:
         layers = tuple(LayerPlan.from_dict(row) for row in data["layers"])
         moves = tuple((source, tuple(into)) for source, into in data.get("moves", ()))
-        return cls(layers, moves)
+        return cls(layers, moves, tuple(data.get("notes", ())))
 
     def describe(self) -> str:
         """One line per move and per layer: path, type, mode, gain, init, install, spec
@@ -69,6 +72,8 @@ class Plan:
         lines = [f"{len(self.moves)} move(s), {len(self.layers)} layer(s)"]
         for source, into in self.moves:
             lines.append(f"  move {source} -> {', '.join(into)}")
+        for note in self.notes:
+            lines.append(f"  note: {note}")
         for p in self.layers:
             spec = f"row_dims={p.spec.row_dims} view={p.spec.view} radius={p.spec.radius}"
             gain = p.gain if p.mode == "unit_gain" else "-"
