@@ -57,9 +57,12 @@ A clean break: no aliases for the removed or renamed names.
 - Unit rows: the sum of squares is floored before the square root in every path, so a zero row
   stays finite in the forward and backward.
 - The kernel backend chosen at first use is logged once per op and device type.
+- Triton launches: a repeated launch calls the compiled kernel directly (same kernel and
+  arguments); host time per launch on a B300 host 36 -> 26 us forward, 42 -> 27 us backward.
 
 ### Added
 
+- `ds.patch_model(model, *inputs)`: analysis, plan, moves and patch in one call.
 - `level="selective"` with `gains`, `output_gain` and `roles`; `Plan.notes`.
 - `ds.optim.param_groups(session, weight_decay, **overrides)`.
 - `ds.nn.QKNorm`, `ds.fold_layerscale`.
