@@ -5,7 +5,6 @@ from collections.abc import Sequence
 
 from torch import Tensor, nn
 
-from dragonscale.functional.rows import row_norms
 from dragonscale.layer_types import LAYER_TYPES
 from dragonscale.patch import grouped
 from dragonscale.patch import state as formats
@@ -22,31 +21,16 @@ log = get_logger("patch")
 
 
 def warn_changed_output(model: nn.Module, plan: Plan) -> None:
-    """Log the layers whose output `init="preserve"` does not keep: `mode="unit"` (no gain), and
-    `method="rescale"` with raw rows off the radius."""
-    modules = dict(model.named_modules())
-    no_gain, off_radius = [], []
-    for layer in plan:
-        if layer.init != "preserve" or layer.tied_to is not None:
-            continue
-        if layer.mode == "unit" and layer.method == "normalize":
-            no_gain.append(layer.path)
-        elif layer.mode == "unit_gain" and layer.method == "rescale":
-            weight = getattr(modules[layer.path], LAYER_TYPES[layer.layer_type].weight)
-            radius = layer.spec.radius_of(weight.shape)
-            norms = row_norms(weight.detach(), layer.spec)
-            if bool(((norms - radius).abs() > 1e-6 * radius).any()):
-                off_radius.append(layer.path)
+    """Log the layers whose output `init="preserve"` does not keep: `mode="unit"` has no gain."""
+    no_gain = [
+        layer.path
+        for layer in plan
+        if layer.init == "preserve" and layer.tied_to is None and layer.mode == "unit"
+    ]
     if no_gain:
         log.warning(
             "init 'preserve' with mode 'unit' has no gain to set; the output changes",
             layers=no_gain,
-        )
-    if off_radius:
-        log.warning(
-            "init 'preserve' with method 'rescale' keeps the output only with raw rows at the "
-            "radius; call ds.optim.reset_raw_norms(session) after apply",
-            layers=off_radius,
         )
 
 

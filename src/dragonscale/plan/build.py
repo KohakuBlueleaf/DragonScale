@@ -37,7 +37,6 @@ def make_plan(model: nn.Module, rules: Sequence[Rule] | str) -> Plan:
             gain=rule.gain,
             init=rule.init,
             install=install,
-            method=rule.method,
         )
 
         # A weight an earlier layer already reads: tie to it

@@ -26,7 +26,6 @@ class Rule:
     spec: RowSpec | Callable[[nn.Module], RowSpec] | None = None
     init: str = "preserve"
     install: str = "auto"
-    method: str = "normalize"
 
     def claims(self, path: str, module: nn.Module) -> bool:
         """Whether this rule claims the module at `path`."""

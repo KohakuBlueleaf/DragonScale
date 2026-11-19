@@ -1,6 +1,5 @@
 """Eager row ops (contracts in `dragonscale_kernels.ops`): rows reduced in fp32, fp64 kept."""
 
-import torch
 from torch import Tensor
 
 from dragonscale_kernels.layout import as_rows, reduced, row_dot, wide
@@ -50,40 +49,3 @@ def unit_rows_bwd(
     grad_w = (c / n) * (g - u * dot)
     grad_gain = None if gain is None else (radius * dot).reshape(-1).to(gain.dtype)
     return grad_w.to(w.dtype).reshape(w.shape), grad_gain
-
-
-def scale_rows(
-    w: Tensor, view: tuple[int, ...], row_dims: tuple[int, ...], scale: Tensor
-) -> Tensor:
-    v = wide(w).reshape(view)
-    return (v * as_rows(scale.to(v.dtype), view, row_dims)).to(w.dtype).reshape(w.shape)
-
-
-def project(t: Tensor, w: Tensor, view: tuple[int, ...], row_dims: tuple[int, ...]) -> Tensor:
-    tv = wide(t).reshape(view)
-    v = wide(w).reshape(view)
-    u = v / as_rows(row_norm(w, view, row_dims).clamp_min(FLOOR).to(v.dtype), view, row_dims)
-    out = tv - u * row_dot(tv, u, reduced(view, row_dims))
-    return out.to(t.dtype).reshape(t.shape)
-
-
-def rescale_rows_(
-    w: Tensor, view: tuple[int, ...], row_dims: tuple[int, ...], radius: float
-) -> Tensor:
-    with torch.no_grad():
-        norms = row_norm(w, view, row_dims)
-        w.copy_(scale_rows(w, view, row_dims, radius / norms.clamp_min(FLOOR)))
-    return norms
-
-
-def project_rescale_rows_(
-    w: Tensor,
-    moments: list[Tensor],
-    view: tuple[int, ...],
-    row_dims: tuple[int, ...],
-    radius: float,
-) -> Tensor:
-    with torch.no_grad():
-        for moment in moments:
-            moment.copy_(project(moment, w, view, row_dims))
-    return rescale_rows_(w, view, row_dims, radius)

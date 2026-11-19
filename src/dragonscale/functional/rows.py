@@ -10,6 +10,9 @@ one opaque op each.
 
 import functools
 import math
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 import torch
@@ -18,6 +21,25 @@ from torch import Tensor
 from dragonscale.spec.rows import RowSpec
 from dragonscale_kernels import ops, resolve
 from dragonscale_kernels.layout import as_rows, reduced, wide
+
+_PLAIN = threading.local()
+
+
+def plain_active() -> bool:
+    """Whether `plain_unit_rows` is active in this thread."""
+    return getattr(_PLAIN, "depth", 0) > 0
+
+
+@contextmanager
+def plain_unit_rows() -> Iterator[None]:
+    """Inside this block every unit-row weight (patched layers, `dragonscale.nn` modules,
+    `unit_rows`) is computed with plain torch ops instead of a kernel backend. The analysis
+    traces models this way, so that it sees every op."""
+    _PLAIN.depth = getattr(_PLAIN, "depth", 0) + 1
+    try:
+        yield
+    finally:
+        _PLAIN.depth -= 1
 
 
 def _gain_rows(gain: Tensor | None, rows: int) -> Tensor | None:
@@ -62,16 +84,6 @@ def reference(w: Tensor, spec: RowSpec, gain: Tensor | None = None) -> Tensor:
     if gain is not None:
         scale = scale * gain.to(scale.dtype)
     return (v * as_rows(scale, view, spec.row_dims)).to(w.dtype).reshape(w.shape)
-
-
-def gain_scaled(w: Tensor, spec: RowSpec, gain: Tensor | None = None) -> Tensor:
-    """The weight of rows kept at the radius by the optimizer: `gain * w` (`w` when no gain)."""
-    gain = _gain_rows(gain, spec.rows(w.shape))
-    if gain is None:
-        return w
-    view = spec.view_of(w.shape)
-    scaled = wide(w).reshape(view) * as_rows(gain.to(wide(w).dtype), view, spec.row_dims)
-    return scaled.to(w.dtype).reshape(w.shape)
 
 
 def fill_zero_rows_(w: Tensor, spec: RowSpec) -> Tensor | None:
@@ -123,6 +135,8 @@ class UnitRowOp:
 
     def __call__(self, w: Tensor, gain: Tensor | None = None) -> Tensor:
         gain = _gain_rows(gain, self.rows)
+        if not torch.compiler.is_compiling() and plain_active():
+            return compiled_unit_rows(w, self.view, self.row_dims, self.radius, gain, None)
         if torch.compiler.is_compiling():
             return compiled_unit_rows(w, self.view, self.row_dims, self.radius, gain, self.backend)
         return UnitRowsFn.apply(w, gain, self)

@@ -11,7 +11,6 @@ from dragonscale.functional.rows import (
     UnitRowOp,
     compiled_unit_rows,
     fill_zero_rows_,
-    gain_scaled,
     preserving_gain,
     unit_row_op,
     zero_rows_,
@@ -19,7 +18,7 @@ from dragonscale.functional.rows import (
 from dragonscale.layer_types import LAYER_TYPES, LayerType
 from dragonscale.nn.layers import WEIGHT_FNS
 from dragonscale.patch import grouped
-from dragonscale.patch.forwards import eval_forward, method_forward
+from dragonscale.patch.forwards import eval_forward, train_forward
 from dragonscale.plan.layer_plan import LayerPlan
 from dragonscale.plan.validate import MARKER
 
@@ -155,9 +154,7 @@ class PatchedLayer:
         self._ops.clear()
 
     def weight(self, raw: Tensor, gain: Tensor | None) -> Tensor:
-        """The weight the layer computes with, from a raw weight and a gain, per method."""
-        if self.plan.method == "rescale":
-            return gain_scaled(raw, self.plan.spec, gain)
+        """The weight the layer computes with, from a raw weight and a gain."""
         if not torch.compiler.is_compiling():
             stash = self.stash
             if (
@@ -206,7 +203,7 @@ class PatchedLayer:
 
     def set_forward(self, training: bool) -> None:
         """Set the forward of the current mode; training mode drops the cache."""
-        forward = method_forward if training else eval_forward
+        forward = train_forward if training else eval_forward
         self.module.forward = partial(forward, self)
         if training:
             self._cache = None

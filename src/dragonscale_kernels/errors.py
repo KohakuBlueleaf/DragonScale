@@ -1,4 +1,4 @@
-"""Errors raised by the kernel registry and tuning."""
+"""Errors raised by the kernel registry."""
 
 
 class NoImplementationError(RuntimeError):

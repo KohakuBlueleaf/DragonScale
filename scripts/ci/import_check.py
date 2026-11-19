@@ -17,7 +17,6 @@ PACKAGES = ("dragonscale", "dragonscale_common", "dragonscale_kernels")
 BACKENDS = {  # backend package: the library it needs
     "dragonscale_kernels.backends.triton": "triton",
     "dragonscale_kernels.backends.compile": "triton",
-    "dragonscale_kernels.backends.tilelang": "tilelang",
 }
 
 

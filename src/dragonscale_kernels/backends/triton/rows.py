@@ -137,34 +137,6 @@ def _bwd_kernel(g_ptr, w_ptr, n_ptr, gain_ptr, gw_ptr, gg_ptr, rows, cols, g_r, 
                  out.to(gw_ptr.dtype.element_ty), mask=m)  # fmt: skip
 
 
-@triton.jit
-def _project_kernel(t_ptr, w_ptr, out_ptr, rows, cols, t_r, t_c, s_r, s_c, o_r, o_c, floor,
-                    BLOCK_R: tl.constexpr, BLOCK_C: tl.constexpr, WIDE: tl.constexpr):  # fmt: skip
-    acc_t = tl.float64 if WIDE else tl.float32
-    r = tl.program_id(0) * BLOCK_R + tl.arange(0, BLOCK_R)
-    rm = r < rows
-    sq = tl.zeros((BLOCK_R,), acc_t)
-    dot = tl.zeros((BLOCK_R,), acc_t)
-    for c0 in range(0, cols, BLOCK_C):
-        c = c0 + tl.arange(0, BLOCK_C)
-        m = rm[:, None] & (c < cols)[None, :]
-        x = tl.load(w_ptr + r[:, None] * s_r + c[None, :] * s_c, mask=m, other=0.0).to(acc_t)
-        t = tl.load(t_ptr + r[:, None] * t_r + c[None, :] * t_c, mask=m, other=0.0).to(acc_t)
-        sq += tl.sum(x * x, axis=1)
-        dot += tl.sum(x * t, axis=1)
-    coef = dot / tl.maximum(sq, floor * floor)
-
-    # t - w <w, t> / |w|^2
-    for c0 in range(0, cols, BLOCK_C):
-        c = c0 + tl.arange(0, BLOCK_C)
-        m = rm[:, None] & (c < cols)[None, :]
-        x = tl.load(w_ptr + r[:, None] * s_r + c[None, :] * s_c, mask=m, other=0.0).to(acc_t)
-        t = tl.load(t_ptr + r[:, None] * t_r + c[None, :] * t_c, mask=m, other=0.0).to(acc_t)
-        out = t - x * coef[:, None]
-        tl.store(out_ptr + r[:, None] * o_r + c[None, :] * o_c,
-                 out.to(out_ptr.dtype.element_ty), mask=m)  # fmt: skip
-
-
 def _grid(rows: int, block_r: int) -> tuple[int]:
     return (triton.cdiv(rows, block_r),)
 
@@ -219,37 +191,3 @@ def unit_rows_bwd(grad, w, view, row_dims, norms, gain, radius):
         block_c, w.dtype == torch.float64, one_pass, num_warps=warps,
     )  # fmt: skip
     return from_2d(grad_w, view, row_dims, w.shape), grad_gain
-
-
-@on_device
-def project(t, w, view, row_dims):
-    t2, _ = as_2d(t, view, row_dims)
-    w2, _ = as_2d(w, view, row_dims)
-    rows, cols = rows_cols(view, row_dims)
-    out = torch.empty((rows, cols), device=t.device, dtype=t.dtype)
-    block_r, block_c, warps, _ = tiles(rows, cols, max(t.element_size(), w.element_size()))
-    _project_kernel[_grid(rows, block_r)](
-        t2, w2, out, rows, cols, *t2.stride(), *w2.stride(), *out.stride(), FLOOR, block_r,
-        block_c, (t.dtype == torch.float64) or (w.dtype == torch.float64), num_warps=warps,
-    )  # fmt: skip
-    return from_2d(out, view, row_dims, t.shape)
-
-
-@on_device
-def rescale_rows_(w, view, row_dims, radius):
-    with torch.no_grad():
-        w2, aliased = as_2d(w, view, row_dims)
-        if aliased:
-            _, norms = _scaled_rows(w, view, row_dims, None, radius, out_2d=w2)
-            return norms
-        out, norms = unit_rows(w, view, row_dims, None, radius)
-        w.copy_(out)
-        return norms
-
-
-@on_device
-def project_rescale_rows_(w, moments, view, row_dims, radius):
-    with torch.no_grad():
-        for moment in moments:
-            moment.copy_(project(moment, w, view, row_dims))
-        return rescale_rows_(w, view, row_dims, radius)

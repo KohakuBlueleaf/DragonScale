@@ -13,7 +13,7 @@ from dragonscale_common.log import get_logger
 from dragonscale_kernels.errors import NoImplementationError
 from dragonscale_kernels.hardware import arch_of
 
-BACKENDS = ("triton", "tilelang", "compile", "eager")
+BACKENDS = ("triton", "compile", "eager")
 log = get_logger("kernels")
 
 

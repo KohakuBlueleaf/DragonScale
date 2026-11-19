@@ -10,7 +10,6 @@ from dragonscale.functional.layers import (
 from dragonscale.functional.rows import (
     UnitRowOp,
     UnitRowsFn,
-    gain_scaled,
     preserving_gain,
     reference,
     row_norms,
@@ -27,7 +26,6 @@ __all__ = [
     "linear",
     "preserving_gain",
     "reference",
-    "gain_scaled",
     "row_norms",
     "transposed_linear",
     "unit_row_op",

@@ -28,8 +28,6 @@ def native_errors(patched: list[PatchedLayer]) -> list[str]:
         where = p.plan.path or "<root>"
         if p.layer_type.unit_class is None:
             errors.append(f"{where}: {p.layer_type.name} has no unit-row module")
-        if p.plan.method != "normalize":
-            errors.append(f"{where}: method {p.plan.method!r} has no unit-row module")
         if p.plan.install == "parametrize" and hasattr(p.module, GAIN):
             errors.append(f"{where}: already has an attribute 'gain'")
     return errors
@@ -76,11 +74,6 @@ def from_baked(state: dict[str, Tensor], patched: list[PatchedLayer]) -> dict[st
         plan = p.plan
         if plan.mode == "unit_gain" and plan.gain == "scalar":
             problems.append(f"{plan.path}: a baked weight does not load into a scalar gain")
-            continue
-        if plan.method == "rescale":
-            problems.append(
-                f"{plan.path}: a baked weight does not load into rows the optimizer rescales"
-            )
             continue
         if plan.mode == "unit_gain":
             weight_key = key(plan.path, p.layer_type.weight)

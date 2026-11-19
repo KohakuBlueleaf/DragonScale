@@ -5,7 +5,7 @@ from typing import Self
 
 from dragonscale.spec.rows import RowSpec
 
-TIED_OPTIONS = ("mode", "spec", "gain", "init", "method")
+TIED_OPTIONS = ("mode", "spec", "gain", "init")
 
 
 @dataclass(frozen=True)
@@ -23,7 +23,6 @@ class LayerPlan:
     gain: str = "channel"
     init: str = "preserve"
     install: str = "forward"
-    method: str = "normalize"
     tied_to: str | None = None
 
     def to_dict(self) -> dict:
@@ -65,7 +64,7 @@ class Plan:
         return cls(layers, moves)
 
     def describe(self) -> str:
-        """One line per move and per layer: path, type, mode, gain, init, install, method, spec
+        """One line per move and per layer: path, type, mode, gain, init, install, spec
         and tie."""
         lines = [f"{len(self.moves)} move(s), {len(self.layers)} layer(s)"]
         for source, into in self.moves:
@@ -76,6 +75,6 @@ class Plan:
             tied = f" tied_to={p.tied_to}" if p.tied_to is not None else ""
             lines.append(
                 f"  {p.path or '<root>'}: {p.layer_type} {p.mode} gain={gain} init={p.init} "
-                f"install={p.install} method={p.method} {spec}{tied}"
+                f"install={p.install} {spec}{tied}"
             )
         return "\n".join(lines)

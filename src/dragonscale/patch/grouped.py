@@ -1,7 +1,7 @@
 """Grouped unit rows: before a model's forward, every eligible patched layer's weight is computed
 in one autograd node (a few kernel launches), and each layer reads its weight from that node.
 
-A layer is eligible when it normalizes, is not tied, has rows first over a contiguous plain
+A layer is eligible when it is not tied, has rows first over a contiguous plain
 weight with storage, has a channel gain or none, and its backend is Triton or unset with Triton
 available. The rest compute their weight per layer as before. Grouping runs, and a stashed weight
 is read, only with gradients on, no saved-tensor hook active (checkpointing, offloading) and
@@ -65,7 +65,7 @@ class GroupedUnitRowsFn(torch.autograd.Function):
 def _eligible(patched) -> tuple[Tensor, Tensor | None, int, float] | None:
     """(raw, gain, rows, radius) when `patched` can join the group, else None."""
     plan = patched.plan
-    if plan.method != "normalize" or patched.tied_to is not None or plan.install == "bake":
+    if patched.tied_to is not None or plan.install == "bake":
         return None
     if tuple(plan.spec.row_dims) != (0,) or patched.backend not in (None, "triton"):
         return None

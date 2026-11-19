@@ -23,7 +23,6 @@ classifiers = [
 
 [project.optional-dependencies]
 triton = ["triton>=3.7"]
-tilelang = ["tilelang"]
 hf = ["transformers"]
 dev = ["pytest", "ruff", "black", "matplotlib", "kohaku-engine"]
 measure = ["transformers", "matplotlib", "kohaku-engine"]
