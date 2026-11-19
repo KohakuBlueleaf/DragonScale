@@ -157,12 +157,13 @@ class _DegreeRecorder(TorchDispatchMode):
 
 
 def parameter_groups(model: nn.Module) -> tuple[list[str], list[Tensor]]:
-    """Every parameter once (tied ones under their first name)."""
-    names, params = [], []
-    for name, param in model.named_parameters():
-        names.append(name)
-        params.append(param)
-    return names, params
+    """Every trained parameter once (tied ones under their first name). A parameter with
+    `requires_grad=False` (a norm's affine after a move, a frozen part) is a constant, as a buffer
+    is: the optimizer does not move its scale. When no parameter requires a gradient, all of
+    them count."""
+    every = list(model.named_parameters())
+    trained = [(n, p) for n, p in every if p.requires_grad] or every
+    return [n for n, _ in trained], [p for _, p in trained]
 
 
 def trace_degrees(model: nn.Module, *inputs, **kwargs) -> DegreeTrace:

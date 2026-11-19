@@ -217,3 +217,26 @@ def test_qk_norm_leaves_no_free_qk_scale():
     assert not any("QK-norm" in note for note in report.notes)
     plan = ds.analysis.suggest(model, x)
     assert {p.path for p in plan if p.mode == "unit"} >= {"q", "k"}
+
+
+def test_frozen_parameters_are_constants():
+    """After `absorb_plan` freezes a moved norm's weight, the analysis treats it as a constant:
+    the stock encoder layers reach no free scale that changes a hidden state."""
+    torch.manual_seed(0)
+    layer = dict(
+        d_model=32, nhead=2, dim_feedforward=64, dropout=0.0, batch_first=True, norm_first=True
+    )
+    model = torch.nn.Sequential(
+        torch.nn.Embedding(64, 32),
+        torch.nn.TransformerEncoderLayer(**layer),
+        torch.nn.TransformerEncoderLayer(**layer),
+        torch.nn.Linear(32, 64),
+    )
+    x = torch.randint(0, 64, (2, 12))
+    plan = ds.analysis.suggest(model, x)
+    ds.apply(model, ds.analysis.absorb_plan(model, plan, x))
+    assert not model[1].norm1.weight.requires_grad
+    assert ds.analysis.free_scales(model, x).summary()["change_hidden_state"] == 0
+    for p in model.parameters():
+        p.requires_grad_(False)
+    assert ds.analysis.free_scales(model, x).names  # nothing trained: every parameter counts
