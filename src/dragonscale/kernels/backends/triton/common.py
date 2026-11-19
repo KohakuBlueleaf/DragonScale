@@ -1,9 +1,12 @@
 """Row views as strided 2D tensors, and tile sizes, for the Triton row kernels."""
 
+import functools
 import math
 
+import torch
 import triton
 from torch import Tensor
+from triton import knobs
 
 from dragonscale.kernels.layout import reduced
 
@@ -12,6 +15,7 @@ MAX_COLS = 2048
 ONE_PASS_BYTES = 64 * 1024  # a row up to this size is read once
 
 
+@functools.lru_cache(maxsize=4096)
 def rows_cols(view: tuple[int, ...], row_dims: tuple[int, ...]) -> tuple[int, int]:
     rows = math.prod(view[axis] for axis in row_dims)
     return rows, math.prod(view) // rows
@@ -20,7 +24,9 @@ def rows_cols(view: tuple[int, ...], row_dims: tuple[int, ...]) -> tuple[int, in
 def as_2d(t: Tensor, view: tuple[int, ...], row_dims: tuple[int, ...]) -> tuple[Tensor, bool]:
     """`t` as `[rows, cols]` (row axes first): a view when strides allow, else a copy; the flag
     says whether the result aliases `t`."""
-    rows, cols = rows_cols(view, row_dims)
+    rows, cols = rows_cols(tuple(view), tuple(row_dims))
+    if tuple(row_dims) == (0,) and t.is_contiguous():
+        return t.view(rows, cols), True  # rows first: the weight is already [rows, cols]
     permuted = t.reshape(view).permute(*row_dims, *reduced(view, row_dims))
     try:
         return permuted.view(rows, cols), True
@@ -30,12 +36,15 @@ def as_2d(t: Tensor, view: tuple[int, ...], row_dims: tuple[int, ...]) -> tuple[
 
 def from_2d(t2: Tensor, view: tuple[int, ...], row_dims: tuple[int, ...], shape) -> Tensor:
     """Inverse of `as_2d` for a `[rows, cols]` result: a tensor of `shape` in view order."""
+    if tuple(row_dims) == (0,):
+        return t2.reshape(shape)
     order = (*row_dims, *reduced(view, row_dims))
     inverse = [order.index(axis) for axis in range(len(view))]
     permuted = t2.reshape([view[axis] for axis in order])
     return permuted.permute(*inverse).reshape(shape)
 
 
+@functools.lru_cache(maxsize=4096)
 def tiles(rows: int, cols: int, element_size: int = 4) -> tuple[int, int, int, bool]:
     """(rows per program, column block, warps, one pass) for a `[rows, cols]` row op: a row that
     fits `ONE_PASS_BYTES` (counted at fp32 or wider) is one tile, read once."""
@@ -45,3 +54,43 @@ def tiles(rows: int, cols: int, element_size: int = 4) -> tuple[int, int, int, b
     block_r = max(1, min(TILE // block_c, triton.next_power_of_2(max(rows, 1))))
     warps = min(16, max(4, block_r * block_c // 1024))
     return block_r, block_c, warps, one_pass
+
+
+_COMPILED: dict[tuple, object] = {}
+_DIRECT = [True]  # off for the process once Triton's launch internals do not match
+
+
+def _key(kernel, num_warps: int, args) -> tuple:
+    """What decides the compiled kernel: the scalar arguments, each tensor's dtype and 16-byte
+    alignment, the warps and the device."""
+    parts = [kernel, num_warps, torch.cuda.current_device()]
+    for a in args:
+        parts.append((a.dtype, a.data_ptr() % 16 == 0) if isinstance(a, Tensor) else a)
+    return tuple(parts)
+
+
+def launch(kernel, grid: tuple[int, ...], args: tuple, num_warps: int) -> None:
+    """`kernel[grid](*args, num_warps=num_warps)`. A repeat of a call with the same key launches
+    the compiled kernel directly, skipping Triton's per-call argument binding (about half of a
+    launch's host time for these kernels); the kernel and its arguments are the same."""
+    key = None
+    if _DIRECT[0]:
+        try:
+            key = _key(kernel, num_warps, args)
+            compiled = _COMPILED.get(key)
+        except TypeError:  # an argument that cannot be part of a key
+            compiled = None
+        if compiled is not None:
+            try:
+                stream = torch.cuda.current_stream().cuda_stream
+                grid3 = (*grid, 1, 1)[:3]
+                meta = compiled.launch_metadata(grid3, stream, *args)
+                compiled.run(*grid3, stream, compiled.function, compiled.packed_metadata, meta,
+                             knobs.runtime.launch_enter_hook, knobs.runtime.launch_exit_hook, *args)  # fmt: skip
+                return
+            except (AttributeError, TypeError):
+                _DIRECT[0] = False
+                _COMPILED.clear()
+    compiled = kernel[grid](*args, num_warps=num_warps)
+    if _DIRECT[0] and key is not None and compiled is not None and len(_COMPILED) < 4096:
+        _COMPILED[key] = compiled

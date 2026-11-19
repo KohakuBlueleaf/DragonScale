@@ -64,8 +64,7 @@ x, y = tokens[:, :-1], tokens[:, 1:]
 print(ds.analysis.free_scales(model, x).describe())
 
 # Unit rows everywhere, a gain only where the loss sees the scale.
-plan = ds.analysis.suggest(model, x)
-session = ds.apply(model, ds.analysis.absorb_plan(model, plan, x))
+session = ds.patch_model(model, x)
 
 # Gains are ordinary parameters; weight decay goes on the raw weights only.
 optimizer = torch.optim.AdamW(ds.optim.param_groups(session, weight_decay=0.1), lr=1e-3)
@@ -90,15 +89,19 @@ Each line is one free scale: scale each tensor on it by `c` to the power shown, 
 stays the same. The first line is the residual stream. The embedding and both layers that write
 into the stream grow together, and the output layer shrinks to match. The second is a norm's
 affine trading scale with the layer that reads it. [docs/analysis.md](docs/analysis.md) explains
-the rest of the report.
+the rest of the report, and [docs/patching.md](docs/patching.md) the steps inside
+`ds.patch_model`, for when you want to edit the plan.
 
 ## How it works
 
 ```mermaid
 flowchart LR
-    model["your model"] --> report["free_scales(model, x)<br/>the free scales, by tensor,<br/>and what the model code could change"]
-    report --> plan["suggest(model, x)<br/>moves norm affines and pair scales,<br/>keeps a gain only where the loss sees it"]
-    plan --> apply["absorb_plan + ds.apply<br/>unit rows times a gain"]
+    model["your model"] --> report["ds.analysis.free_scales(model, x)<br/>the free scales, by tensor,<br/>and what the model code could change"]
+    model --> patch["ds.patch_model(model, x)"]
+    subgraph patch_steps [" "]
+        patch --> plan["suggest: move norm affines and pair scales,<br/>keep a gain only where the loss sees it"]
+        plan --> apply["apply: unit rows times a gain"]
+    end
     apply --> train["train as usual<br/>any optimizer"]
     train --> out["session.bake()<br/>stock modules"]
     train --> native["session.canonicalize()<br/>ds.nn modules"]
@@ -141,15 +144,16 @@ A patched layer computes with unit rows in place of its weight:
 W_{\text{eff}} = \mathrm{diag}(g)\; r\; \frac{W}{\lVert W \rVert_{\text{row}}}
 ```
 
-Here $r$ is a fixed row length: 1 for linears and convs, $\sqrt{\text{dim}}$ for embeddings. The
-raw row length no longer reaches the output, so its drift does nothing. The scale lives in the
+The length of a row no longer matters; only its direction and its gain do. Here $r$ is a fixed
+row length: 1 for linears and convs, $\sqrt{\text{dim}}$ for embeddings. The raw row length no
+longer reaches the output, so its drift does nothing. The scale lives in the
 gain $g$, one number per row, which the loss does see. Without weight decay the raw rows still
 grow slowly, and each step turns them a little less: under Adam the turn per step falls as
 $1/\sqrt{t}$ (figure C below).
 
 Where the gains go is the one choice left:
 
-| `suggest(..., gains=)` | gain on | free scales left that change a hidden state | output at the start |
+| `patch_model(..., gains=)` | gain on | free scales left that change a hidden state | output at the start |
 | --- | --- | --- | --- |
 | `"all"` (same as `level="absorb"`) | every patched layer | the stream, through the gains | unchanged |
 | `"selective"` (default) | only where the loss sees the scale | none | changes in the layers that lose their gain |

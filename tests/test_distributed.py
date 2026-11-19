@@ -46,7 +46,8 @@ def _train(model, batches):
 
 
 def _worker(rank: int, world: int, port: int, kind: str, out: str) -> None:
-    os.environ.update(MASTER_ADDR="127.0.0.1", MASTER_PORT=str(port))
+    # CPU processes: the CUDA device of the host, if any, stays out of both groups
+    os.environ.update(MASTER_ADDR="127.0.0.1", MASTER_PORT=str(port), CUDA_VISIBLE_DEVICES="")
     dist.init_process_group("gloo", rank=rank, world_size=world)
     try:
         model = _model()
@@ -55,12 +56,15 @@ def _worker(rank: int, world: int, port: int, kind: str, out: str) -> None:
             _train(wrapped, [_data(rank)])
             state = model.state_dict()
         else:
+            from torch.distributed.device_mesh import init_device_mesh
             from torch.distributed.fsdp import fully_shard
+
+            mesh = init_device_mesh("cpu", (world,))
 
             for layer in model:
                 if any(True for _ in layer.parameters()):
-                    fully_shard(layer)
-            fully_shard(model)
+                    fully_shard(layer, mesh=mesh)
+            fully_shard(model, mesh=mesh)
             _train(model, [_data(rank)])
             state = {
                 k: v.full_tensor() if hasattr(v, "full_tensor") else v

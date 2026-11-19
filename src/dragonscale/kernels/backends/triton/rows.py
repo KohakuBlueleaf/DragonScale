@@ -12,7 +12,7 @@ import triton
 import triton.language as tl
 from torch import Tensor
 
-from dragonscale.kernels.backends.triton.common import as_2d, from_2d, rows_cols, tiles
+from dragonscale.kernels.backends.triton.common import as_2d, from_2d, launch, rows_cols, tiles
 from dragonscale.kernels.ops import FLOOR
 
 
@@ -144,29 +144,25 @@ def _grid(rows: int, block_r: int) -> tuple[int]:
 @on_device
 def row_norm(w: Tensor, view: tuple[int, ...], row_dims: tuple[int, ...]) -> Tensor:
     w2, _ = as_2d(w, view, row_dims)
-    rows, cols = rows_cols(view, row_dims)
+    rows, cols = rows_cols(tuple(view), tuple(row_dims))
     norms = torch.empty(rows, device=w.device, dtype=_acc_dtype(w))
     block_r, block_c, warps, _ = tiles(rows, cols, w.element_size())
-    _norm_kernel[_grid(rows, block_r)](
-        w2, norms, rows, cols, *w2.stride(), block_r, block_c, w.dtype == torch.float64,
-        num_warps=warps,
-    )  # fmt: skip
+    args = (w2, norms, rows, cols, *w2.stride(), block_r, block_c, w.dtype == torch.float64)
+    launch(_norm_kernel, _grid(rows, block_r), args, warps)
     return norms
 
 
 def _scaled_rows(w, view, row_dims, gain, radius, out_2d=None):
     """`w` scaled per row by `gain * radius / norm`, written into `out_2d` (else a new tensor)."""
     w2, _ = as_2d(w, view, row_dims)
-    rows, cols = rows_cols(view, row_dims)
+    rows, cols = rows_cols(tuple(view), tuple(row_dims))
     out = torch.empty((rows, cols), device=w.device, dtype=w.dtype) if out_2d is None else out_2d
     norms = torch.empty(rows, device=w.device, dtype=_acc_dtype(w))
     block_r, block_c, warps, one_pass = tiles(rows, cols, w.element_size())
     gain_arg = gain.contiguous() if gain is not None else norms
-    _unit_kernel[_grid(rows, block_r)](
-        w2, gain_arg, out, norms, rows, cols, *w2.stride(), *out.stride(), float(radius),
-        FLOOR, gain is not None, block_r, block_c, w.dtype == torch.float64, one_pass,
-        num_warps=warps,
-    )  # fmt: skip
+    args = (w2, gain_arg, out, norms, rows, cols, *w2.stride(), *out.stride(), float(radius),
+            FLOOR, gain is not None, block_r, block_c, w.dtype == torch.float64, one_pass)  # fmt: skip
+    launch(_unit_kernel, _grid(rows, block_r), args, warps)
     return out, norms
 
 
@@ -180,14 +176,13 @@ def unit_rows(w, view, row_dims, gain, radius):
 def unit_rows_bwd(grad, w, view, row_dims, norms, gain, radius):
     g2, _ = as_2d(grad, view, row_dims)
     w2, _ = as_2d(w, view, row_dims)
-    rows, cols = rows_cols(view, row_dims)
+    rows, cols = rows_cols(tuple(view), tuple(row_dims))
     grad_w = torch.empty((rows, cols), device=w.device, dtype=w.dtype)
     grad_gain = None if gain is None else torch.empty_like(gain)
     block_r, block_c, warps, one_pass = tiles(rows, cols, w.element_size())
-    _bwd_kernel[_grid(rows, block_r)](
-        g2, w2, norms, gain if gain is not None else norms, grad_w,
-        grad_gain if grad_gain is not None else norms, rows, cols, *g2.stride(),
-        *w2.stride(), *grad_w.stride(), float(radius), FLOOR, gain is not None, block_r,
-        block_c, w.dtype == torch.float64, one_pass, num_warps=warps,
-    )  # fmt: skip
+    args = (g2, w2, norms, gain if gain is not None else norms, grad_w,
+            grad_gain if grad_gain is not None else norms, rows, cols, *g2.stride(),
+            *w2.stride(), *grad_w.stride(), float(radius), FLOOR, gain is not None, block_r,
+            block_c, w.dtype == torch.float64, one_pass)  # fmt: skip
+    launch(_bwd_kernel, _grid(rows, block_r), args, warps)
     return from_2d(grad_w, view, row_dims, w.shape), grad_gain

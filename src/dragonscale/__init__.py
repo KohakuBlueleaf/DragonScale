@@ -11,6 +11,7 @@ session.bake()                               # stock modules with the unit-row w
 
 from dragonscale import analysis, functional, layer_types, monitor, nn, optim, spec
 from dragonscale.patch import Session, apply
+from dragonscale.patch.auto import patch_model
 from dragonscale.patch.layerscale import fold_layerscale
 from dragonscale.plan import PRESETS, LayerPlan, Plan, Rule, make_plan, preset, validate
 from dragonscale.spec import RowSpec, defaults
@@ -34,6 +35,7 @@ __all__ = [
     "monitor",
     "nn",
     "optim",
+    "patch_model",
     "preset",
     "spec",
     "validate",

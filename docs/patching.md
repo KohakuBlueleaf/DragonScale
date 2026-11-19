@@ -1,5 +1,28 @@
 # Patching
 
+`ds.patch_model(model, *inputs)` runs three steps. Run them yourself to look at or edit the plan
+in between:
+
+```python
+import torch
+from torch import nn
+
+import dragonscale as ds
+
+torch.manual_seed(0)
+net = nn.Sequential(nn.Embedding(32, 16), nn.Linear(16, 64), nn.GELU(), nn.Linear(64, 32))
+t = torch.randint(0, 32, (4, 8))
+plan = ds.analysis.suggest(net, t)  # the plan: one LayerPlan per layer, moves, notes
+plan = ds.analysis.absorb_plan(net, plan, t)  # make the moves; the output does not change
+session = ds.apply(net, plan)  # patch
+session.remove()
+```
+
+`patch_model` takes the same options as `suggest` (`level`, `gains`, `output_gain`, `roles`,
+`allow_unknown`) and as `apply` (`backend`, `group`).
+
+## Plans and rules
+
 A plan is data: one `LayerPlan` per layer. `ds.make_plan(model, rules)` matches `ds.Rule(match,
 **options)` against module paths (a regex) or types, first match wins. `ds.apply` takes a plan, a
 rule list or a preset name (`unit_gain`, `unit`, `linear_unit_gain`, `conv_unit_gain`,
@@ -14,11 +37,6 @@ rule list or a preset name (`unit_gain`, `unit`, `linear_unit_gain`, `conv_unit_
 | `spec` | a `ds.RowSpec` | which dimensions form a row, and the radius |
 
 ```python
-import torch
-from torch import nn
-
-import dragonscale as ds
-
 model = nn.Sequential(nn.Linear(8, 32), nn.GELU(), nn.Linear(32, 8))
 x = torch.randn(4, 8)
 before = model(x)

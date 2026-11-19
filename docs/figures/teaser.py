@@ -43,6 +43,9 @@ EVEN = [0.7] * 5
 SHRINKING = [0.4, 0.25, 0.35, 0.2, 0.3]
 GAINS = [0.35, 0.8, 0.5, 0.2, 0.6]
 UNIT = r"$\hat W$"
+TITLE = (
+    "Free scales in a pre-norm transformer, two ways to remove them, and what removing them does"
+)
 
 
 class Canvas:
@@ -220,13 +223,14 @@ def ladder_panel(ax, theme):
             [r["low"], r["high"]], [y, y], color=color, lw=4, alpha=0.35, solid_capstyle="round"
         )
         ax.plot(r["growth_per_decade"], y, marker="o", color=color, ms=8)
-        ax.annotate(f"{int(r['free_scales'])}", (r["high"], y), xytext=(8, 0), textcoords="offset points",
+        count = int(r["free_scales"])
+        ax.annotate(f"{count} free scale{'s' if count != 1 else ''}", (r["high"], y), xytext=(8, 0), textcoords="offset points",
                     va="center", fontsize=FONT - 2, color=t["muted"])  # fmt: skip
     ax.set_yticks(ys, [short.get(r["model"], r["model"]) for r in data])
-    ax.set(xscale="log", xlim=(0.8, 3e4), ylim=(-0.6, len(data) - 0.4))
+    ax.set(xscale="log", xlim=(0.8, 3e5), ylim=(-0.6, len(data) - 0.4))
     ax.grid(axis="y", visible=False)
     ax.set_xlabel("growth per 10x learning rate")
-    ax.set_title("free scales (number) against growth", fontsize=FONT)
+    ax.set_title("fewer free scales, less growth", fontsize=FONT)
 
 
 def draw(theme: str):
@@ -246,9 +250,10 @@ def draw(theme: str):
         c = SLOTS[theme]
         handles = [Line2D([], [], color=c[MODEL[m]], lw=3, label=label) for m, label in
                    (("standard", "standard pre-norm transformer"), ("patched", "with DragonScale"))]  # fmt: skip
-        fig.legend(
+        legend = fig.legend(
             handles=handles, loc="outside upper center", ncol=2, frameon=False, fontsize=FONT + 1
         )
+        legend.set_title(TITLE, prop={"size": FONT + 7, "weight": "bold"})
     return fig
 
 

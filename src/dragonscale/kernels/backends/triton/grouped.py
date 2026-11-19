@@ -11,7 +11,7 @@ import triton
 import triton.language as tl
 from torch import Tensor
 
-from dragonscale.kernels.backends.triton.common import ONE_PASS_BYTES, TILE
+from dragonscale.kernels.backends.triton.common import ONE_PASS_BYTES, TILE, launch
 from dragonscale.kernels.ops import FLOOR
 
 FWD_FIELDS = 8  # w, out, gain (0: none), norms, rows, cols, first program, unused
@@ -91,6 +91,20 @@ def _grouped_bwd(table, radii, n_tensors, floor, W_T: tl.constexpr, G_T: tl.cons
     tl.store(gw_ptr + offsets, out.to(W_T), mask=m)
 
 
+_RADII: dict[tuple, Tensor] = {}
+
+
+def _radii(values: tuple[float, ...], device: torch.device) -> Tensor:
+    """The radii of a bucket as a device tensor, built once per (radii, device)."""
+    key = (values, device)
+    out = _RADII.get(key)
+    if out is None:
+        out = torch.tensor(values, dtype=torch.float32).to(device)
+        if len(_RADII) < 1024:
+            _RADII[key] = out
+    return out
+
+
 def fits(w: Tensor) -> bool:
     """Whether `w` (as `[rows, cols]`) can join a grouped launch."""
     return (
@@ -132,12 +146,11 @@ def unit_rows_grouped(
             start += triton.cdiv(w.shape[0], block_r)
         device = ws[members[0]].device
         table = torch.tensor(rows, dtype=torch.int64).to(device, non_blocking=True)
-        radius = torch.tensor([radii[i] for i in members], dtype=torch.float32)
+        radius_list = tuple(radii[i] for i in members)
         with torch.cuda.device(device):
-            _grouped_fwd[(start,)](
-                table, radius.to(device, non_blocking=True), len(members), FLOOR,
-                TL_DTYPES[w_dtype], TL_DTYPES[g_dtype], block_r, block_c, num_warps=warps,
-            )  # fmt: skip
+            args = (table, _radii(radius_list, device), len(members), FLOOR, TL_DTYPES[w_dtype],
+                    TL_DTYPES[g_dtype], block_r, block_c)  # fmt: skip
+            launch(_grouped_fwd, (start,), args, warps)
     return outs, norms
 
 
@@ -163,10 +176,9 @@ def unit_rows_grouped_bwd(
             start += triton.cdiv(w.shape[0], block_r)
         device = ws[members[0]].device
         table = torch.tensor(rows, dtype=torch.int64).to(device, non_blocking=True)
-        radius = torch.tensor([radii[i] for i in members], dtype=torch.float32)
+        radius_list = tuple(radii[i] for i in members)
         with torch.cuda.device(device):
-            _grouped_bwd[(start,)](
-                table, radius.to(device, non_blocking=True), len(members), FLOOR,
-                TL_DTYPES[w_dtype], TL_DTYPES[g_dtype], block_r, block_c, num_warps=warps,
-            )  # fmt: skip
+            args = (table, _radii(radius_list, device), len(members), FLOOR, TL_DTYPES[w_dtype],
+                    TL_DTYPES[g_dtype], block_r, block_c)  # fmt: skip
+            launch(_grouped_bwd, (start,), args, warps)
     return grad_ws, grad_gains

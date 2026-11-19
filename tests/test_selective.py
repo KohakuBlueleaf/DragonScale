@@ -240,3 +240,16 @@ def test_frozen_parameters_are_constants():
     for p in model.parameters():
         p.requires_grad_(False)
     assert ds.analysis.free_scales(model, x).names  # nothing trained: every parameter counts
+
+
+def test_patch_model_is_the_three_steps():
+    inputs = DIFFUSION
+    one, two = _build(am.DiT), _build(am.DiT)
+    session = ds.patch_model(one, *inputs, output_gain=0.18)
+    plan = ds.analysis.suggest(two, *inputs, output_gain=0.18)
+    ds.apply(two, ds.analysis.absorb_plan(two, plan, *inputs))
+    modes = {p.plan.path: (p.plan.mode, p.plan.init) for p in session.patched}
+    assert modes == {
+        p.plan.path: (p.plan.mode, p.plan.init) for p in ds.Session.from_model(two).patched
+    }
+    torch.testing.assert_close(_output(one, inputs), _output(two, inputs))
