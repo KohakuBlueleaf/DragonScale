@@ -3,7 +3,7 @@
 | level | plan |
 | --- | --- |
 | `report` | empty; the report (with its architecture notes) is the result |
-| `minimal` | `unit_gain` on every module whose weight is a matrix in a dangerous direction |
+| `minimal` | `unit_gain` on every module whose weight is a matrix in a free scale that changes a hidden state |
 | `matrices` | `unit_gain` on every module with a layer type; affines and biases kept |
 | `absorb` | norm affines moved into their consumers and frozen; layers whose rows can move |
 | | into their consumers absorbed (`mode="unit"`, `init="absorb"`), every other one `unit_gain` |
@@ -44,10 +44,15 @@ def _minimal(model: nn.Module, report: FreeScales) -> Plan:
     params = dict(model.named_parameters())
     held = holders(model)
     paths, problems = set(), []
-    for name in sorted({n for d in report.dangerous for n in d.fast_ends}):
+    shapes = dict(zip(report.names, report.shapes, strict=True))
+    in_changing = {n for d in report.changing for n in d.coeffs if len(shapes[n]) >= 2}
+    for name in sorted(in_changing):
         found = held.get(id(params[name]))
         if not found:
-            problems.append(f"{name}: in a dangerous direction, held by no module with a type")
+            problems.append(
+                f"{name}: a matrix in a free scale that changes a hidden state, held by no "
+                "module with a layer type"
+            )
             continue
         paths.update(found)
     raise_problems(problems)

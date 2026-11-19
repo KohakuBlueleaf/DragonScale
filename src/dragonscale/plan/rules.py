@@ -24,7 +24,7 @@ class Rule:
     mode: str = "unit_gain"
     gain: str = "channel"
     spec: RowSpec | Callable[[nn.Module], RowSpec] | None = None
-    init: str = "preserve"
+    init: str | float = "preserve"
     install: str = "auto"
 
     def claims(self, path: str, module: nn.Module) -> bool:

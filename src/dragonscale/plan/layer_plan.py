@@ -21,7 +21,7 @@ class LayerPlan:
     mode: str
     spec: RowSpec
     gain: str = "channel"
-    init: str = "preserve"
+    init: str | float = "preserve"
     install: str = "forward"
     tied_to: str | None = None
 

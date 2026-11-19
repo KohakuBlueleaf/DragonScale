@@ -1,7 +1,7 @@
-"""Analysis on a one-block stock pre-norm LM: the free pairs worked out by hand are found and are
-dangerous, the SiLU-pinned pair is not; a fixed-scale input behind a final norm leaves the writers
-weakly pinned; suggest + apply leaves none dangerous; absorb keeps the function and refuses a
-pinned move."""
+"""Analysis on a one-block stock pre-norm LM: the free pairs worked out by hand are found and
+change a hidden state, the SiLU-pinned pair is not free; a fixed-scale input behind a final norm
+leaves the writers weakly pinned; suggest + apply leaves no free scale with a matrix that changes a
+hidden state; absorb keeps the function and refuses a pinned move."""
 
 import pytest
 import torch
@@ -39,14 +39,23 @@ def test_free_scales_before_and_after_suggest():
     for name, coeffs in PAIRS.items():
         assert report.contains(coeffs), name
     assert not report.contains(PINNED)
-    assert {f for d in report.dangerous for f in d.fast_ends} >= {
-        n for c in PAIRS.values() for n in c if "norm" not in n
+    assert {f for d in report.changing for f in d.coeffs} >= {n for c in PAIRS.values() for n in c}
+    assert report.summary() == {
+        "change_hidden_state": 7,
+        "change_none": 0,
+        "weakly_pinned": 0,
+        "ops_without_rule": 0,
     }
 
     ds.apply(model, suggest(model, x, level="minimal", report=report))
     after = free_scales(model, x)
-    assert after.dangerous == []
+    assert _matrices_in_changing(after) == set()
     assert after.contains({f"{B}.up.weight": 1})
+
+
+def _matrices_in_changing(report) -> set[str]:
+    shapes = dict(zip(report.names, report.shapes, strict=True))
+    return {n for d in report.changing for n in d.coeffs if len(shapes[n]) >= 2}
 
 
 def test_absorb_keeps_the_function_and_refuses_pinned_moves():
@@ -115,15 +124,14 @@ def test_absorb_level_keeps_the_function():
         ds.Session(model, plan)
     ds.apply(model, ds.analysis.absorb_plan(model, plan, x))
     assert torch.allclose(model(x), before, rtol=1e-10, atol=1e-12)
-    assert free_scales(model, x).dangerous == []
+    assert _matrices_in_changing(free_scales(model, x)) == set()
     for norm in (model.blocks[0].norm1, model.blocks[0].norm2, model.norm):
         assert not norm.weight.requires_grad
 
 
-def test_architecture_notes():
+def test_model_notes():
     notes = free_scales(_model(), tokens()).notes
     assert any("attention calls [0]" in note for note in notes)
-    assert any("scale the residual stream together" in note for note in notes)
 
 
 @pytest.mark.parametrize("final_norm", [True, False])
@@ -137,8 +145,29 @@ def test_fixed_scale_input_behind_a_final_norm_is_weakly_pinned(final_norm):
     writers = {f"{B}.out.weight", f"{B}.down.weight"}
     if final_norm:
         assert [set(d.coeffs) for d in report.weak] == [writers]
-        assert report.weak[0].dangerous
+        assert report.weak[0].changes_hidden_state
         assert report.weak[0].anchors == (f"{B}: aten::add",)
-        assert any("held only by a fixed-scale addend" in note for note in report.notes)
+        assert any("held only by a fixed-scale term" in note for note in report.notes)
     else:
         assert report.weak == []
+
+
+def test_counts_do_not_depend_on_the_basis():
+    """Two free scales that change a hidden state through the same tensor and one that changes
+    none: the counts are the dimensions rank(D N) and dim ker A - rank(D N)."""
+    torch.manual_seed(0)
+    model = torch.nn.Sequential(
+        torch.nn.Linear(4, 4, bias=False),
+        torch.nn.Linear(4, 4, bias=False),
+        torch.nn.LayerNorm(4, elementwise_affine=False),
+        torch.nn.Linear(4, 2),
+    ).double()
+    x = torch.randn(3, 4, dtype=torch.float64)
+    report = free_scales(model, x)
+    # 0 and 1 trade (changes the hidden state between them); 0 + 1 together is cut by the norm
+    assert report.count == 2
+    assert report.summary()["change_hidden_state"] == 2
+    ds.apply(model, [ds.Rule("1", mode="unit", init="ones"), ds.Rule(".*", mode="plain")])
+    report = free_scales(model, x)
+    assert report.summary()["change_hidden_state"] == 1  # 0's scale, cut by unit rows of 1
+    assert report.summary()["change_none"] == 1  # 1's raw weight

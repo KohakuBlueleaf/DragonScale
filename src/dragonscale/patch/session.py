@@ -22,17 +22,25 @@ log = get_logger("patch")
 
 
 def warn_changed_output(model: nn.Module, plan: Plan) -> None:
-    """Log the layers whose output `init="preserve"` does not keep: `mode="unit"` has no gain."""
+    """Log the layers that start with another output than the model had: `mode="unit"` with
+    `init="preserve"` (no gain to set), and a number as `init` (the gain starts at it)."""
     no_gain = [
         layer.path
         for layer in plan
         if layer.init == "preserve" and layer.tied_to is None and layer.mode == "unit"
+    ]
+    fixed = [
+        layer.path
+        for layer in plan
+        if isinstance(layer.init, int | float) and layer.tied_to is None
     ]
     if no_gain:
         log.warning(
             "init 'preserve' with mode 'unit' has no gain to set; the output changes",
             layers=no_gain,
         )
+    if fixed:
+        log.warning("the gain starts at the given number; the output changes", layers=fixed)
 
 
 class Session:

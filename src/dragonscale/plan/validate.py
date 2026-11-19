@@ -37,6 +37,11 @@ def _layer_errors(layer: LayerPlan, module: nn.Module) -> list[str]:
         errors.append(f"{where}: already has an instance forward; use install 'parametrize'")
     if layer.mode == "unit_gain" and layer.install == "forward" and hasattr(module, "gain"):
         errors.append(f"{where}: already has an attribute 'gain'")
+    inits = ("preserve", "reset", "ones", "absorb")
+    if not (layer.init in inits or isinstance(layer.init, int | float)):
+        return [f"{where}: init {layer.init!r} is not a number or one of {inits}"]
+    if isinstance(layer.init, int | float) and layer.mode != "unit_gain":
+        errors.append(f"{where}: a number as init sets a gain; mode {layer.mode!r} has none")
     preserving = layer.init in ("preserve", "reset")
     if preserving and layer.mode == "unit_gain" and layer.gain == "scalar":
         errors.append(f"{where}: init {layer.init!r} needs a channel gain")

@@ -232,7 +232,8 @@ class PatchedLayer:
             start = preserving_gain(raw, plan.spec)
         else:
             rows = plan.spec.rows(raw.shape) if plan.gain == "channel" else 1
-            start = torch.ones(rows, device=raw.device)
+            value = float(plan.init) if isinstance(plan.init, int | float) else 1.0
+            start = torch.full((rows,), value, device=raw.device)
         return nn.Parameter(start.to(raw.dtype))
 
     def install(self) -> None:

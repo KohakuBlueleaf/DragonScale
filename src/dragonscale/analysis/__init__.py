@@ -1,5 +1,5 @@
-"""Free-scale analysis: degree propagation over a real forward, the free directions it leaves,
-the scale-Jacobian spectrum, the plan that removes the dangerous ones, and scale moves.
+"""Free-scale analysis: degree propagation over one real forward, the free scales it leaves, the
+scale-Jacobian spectrum, the plans that remove free scales, and scale moves.
 
     report = ds.analysis.free_scales(model, x)
     print(report.describe())

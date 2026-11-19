@@ -9,7 +9,7 @@ optimizer = torch.optim.AdamW(model.parameters())  # gains are module parameters
 session.bake()                               # stock modules with the unit-row weights
 """
 
-from dragonscale import analysis, functional, layer_types, monitor, nn, spec
+from dragonscale import analysis, functional, layer_types, monitor, nn, optim, spec
 from dragonscale.patch import Session, apply
 from dragonscale.plan import PRESETS, LayerPlan, Plan, Rule, make_plan, preset, validate
 from dragonscale.spec import RowSpec, defaults
@@ -31,6 +31,7 @@ __all__ = [
     "make_plan",
     "monitor",
     "nn",
+    "optim",
     "preset",
     "spec",
     "validate",
