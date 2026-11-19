@@ -1,429 +1,324 @@
 # DragonScale
 
-![DragonScale: a pre-norm transformer's free scales drift where the loss cannot see them; EDM2 and nGPT fix every scale by construction; DragonScale finds the free scales in the model you have and gives each one owner, a gain the loss moves. Right: JiT-B/16's stream peak, stock 1,694 against arch 15, and a byte-level LM's loss against learning rate](docs/assets/teaser.png)
+<picture><source media="(prefers-color-scheme: dark)" srcset="docs/figures/teaser_dark.png"><img alt="Left: a pre-norm transformer, whose residual stream and weight pairs can trade scale freely; middle: nGPT and EDM2, which fix every scale by construction; right: DragonScale, unit rows with a gain only where the loss sees the scale. Right panels: hidden-state size against learning rate for a small language model, standard and patched, and the number of free scales against how fast the hidden state grows with the learning rate" src="docs/figures/teaser.png"></picture>
 
-A PyTorch library that keeps weight and activation scales from drifting during training.
+Some scales in a network can change without changing what the loss sees. In a transformer MLP
+you can multiply `up` by 2 and divide `down` by 2 and get the same output. The loss gives no
+gradient along such a direction, but every optimizer step still moves the weights a little along
+it, and those moves add up. The residual stream of a pre-norm transformer is the largest case: it
+can grow while the output layer shrinks to match. We call such a direction a **free scale**.
 
-Some scales in a network can change without changing what the loss sees: in a transformer MLP you
-can multiply `up` by 2 and divide `down` by 2 and get the same output. The loss gives no gradient
-along such a direction, but every optimizer step still moves the weights a little along it, and
-those moves add up. Over training the residual stream, the attention logits and the weight norms
-grow, until fp16 overflows or training diverges. DragonScale finds these directions in any model,
-gives the rows of the weights behind them a fixed length, and keeps one learned gain per row in
-their place. Scales can still grow, but only through gains the loss sees and moves.
+DragonScale finds the free scales of a PyTorch model by tracing one forward pass. It then rewrites
+the weights as rows of fixed length, with a learned gain per row only where the loss sees the
+scale. After the patch, no free scale changes a hidden state.
 
 **Contents:** [Highlights](#highlights) · [Install](#install) · [Quick start](#quick-start) ·
-[How it works](#how-it-works) · [Why scales drift](#why-scales-drift) · [Analysis](#analysis) ·
-[Patching options](#patching-options) · [Optimizer](#optimizer) · [Checkpoints](#checkpoints) ·
-[Kernels and speed](#kernels-and-speed) · [Measured](#measured) · [Repository](#repository)
+[How it works](#how-it-works) · [Why scales drift](#why-scales-drift) ·
+[What DragonScale changes](#what-dragonscale-changes) ·
+[Results on small models](#results-on-small-models) · [Kernels and speed](#kernels-and-speed) ·
+[Training notes](#training-notes) · [Supported layers and limits](#supported-layers-and-limits) ·
+[Checkpoints](#checkpoints) · [Repository](#repository)
 
 ## Highlights
 
-- **Finds the free scales of any model** in one forward pass: `ds.analysis.free_scales` follows the
-  scale of every parameter through every op and reports which directions the loss cannot see,
-  which of them move activations, and what the architecture could change.
-- **Patches the model you already have, same output at step 0.** Linear, Conv, ConvTranspose,
-  Embedding and GPT-2's `Conv1D` get unit rows and a gain; tied weights share one gain; `bake`
-  returns stock modules.
-- **The stream stays where the loss can see it.** JiT-B/16 at lr 1e-3: stock's stream peaks at
-  1,694, `arch` at 15. Byte-level LM: stock trains up to lr 5e-3, `arch` up to 1.0, at a lower
-  best loss (0.930 against 0.947).
-- **Costs little.** Triton kernels at 85–96% of memory bandwidth on large weights (V100, RTX 2080
-  Ti, 3090, 4090), against 54–64% for `torch.compile` and 21–25% for eager; a grouped launch for
-  many small layers; under `torch.compile` a patched model runs within 3–6% of stock at the same
-  memory.
+- **Finds every free scale in one forward pass** and names the tensors in each one, split into
+  those that change a hidden state and those that do not.
+- **Leaves no free scale that changes a hidden state.** The tests check this on small versions of
+  a language model, a diffusion transformer, a ViT student and a ConvNeXt student.
+- **Keeps the hidden state in place.** On a small language model with Adam, the standard model's
+  hidden state grows about 2,500x for every 10x in learning rate; the patched model's grows 1.1x.
+- **Hand-written Triton kernels by default.** On an NVIDIA B300 the unit-row op is 1.3x to 11x
+  faster than its `torch.compile` version (GPU time, 8 weight shapes, 3 dtypes). With
+  `torch.compile` of the whole model, a patched layer's training step takes 100% to 124% of the
+  plain layer's.
+- **fp16 AMP and bf16 AMP.** Row lengths are summed in fp32, and every backend matches an fp64
+  reference to the rounding of the weight's own dtype.
 
 ## Install
 
 ```bash
-uv pip install -e .                  # extras: triton, hf, measure, dev
+pip install "dragonscale[triton]"    # GPU, with the Triton kernels
+pip install dragonscale              # CPU only
 ```
 
-Needs Python 3.11+ and torch 2.9+.
+From source: `pip install -e ".[triton]"`. Needs Python 3.11+ and PyTorch 2.9+.
 
 ## Quick start
 
 ```python
 import torch
+from torch import nn
+
 import dragonscale as ds
 
-model = MyModel()
+torch.manual_seed(0)
+model = nn.Sequential(  # a small pre-norm transformer: embedding, one block, output layer
+    nn.Embedding(256, 64),
+    nn.TransformerEncoderLayer(64, nhead=4, dropout=0.0, batch_first=True, norm_first=True),
+    nn.Linear(64, 256),
+)
+tokens = torch.randint(0, 256, (8, 33))
+x, y = tokens[:, :-1], tokens[:, 1:]
 
-# Which scales does the loss not see, which of them are risky, what should the model change?
-report = ds.analysis.free_scales(model, example_input)
-print(report.describe())
+# Which scales can move without the loss seeing them?
+print(ds.analysis.free_scales(model, x).describe())
 
-# Unit rows and a gain on every Linear / Conv / Embedding; the output is unchanged.
-session = ds.apply(model, ds.analysis.suggest(model, example_input, level="matrices"))
+# Unit rows everywhere, a gain only where the loss sees the scale.
+plan = ds.analysis.suggest(model, x)
+session = ds.apply(model, ds.analysis.absorb_plan(model, plan, x))
 
-optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)   # gains are ordinary parameters
-# ... train as usual ...
+# Gains are ordinary parameters; weight decay goes on the raw weights only.
+optimizer = torch.optim.AdamW(ds.optim.param_groups(session, weight_decay=0.1), lr=1e-3)
+for step in range(10):
+    loss = nn.functional.cross_entropy(model(x).flatten(0, 1), y.flatten())
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
 
-session.bake()      # back to stock modules with the trained weights, same output
+session.bake()  # back to stock modules with the trained weights, same output
 ```
 
-`ds.apply` works on a model you already have: an existing checkpoint is converted with the same
-output at step 0. Training from scratch works the same way.
+The report for this model, in part:
+
+```text
+4 free scale(s): 4 change a hidden state, 0 change none; 0 weakly pinned; 0 op call(s) without a rule
+  +1 0.weight +1 1.self_attn.out_proj.weight +1 1.self_attn.out_proj.bias +1 1.linear2.weight +1 1.linear2.bias -1 2.weight
+  +1 1.linear1.weight -1 1.norm2.weight -1 1.norm2.bias
+```
+
+Each line is one free scale: scale each tensor on it by `c` to the power shown, and the output
+stays the same. The first line is the residual stream. The embedding and both layers that write
+into the stream grow together, and the output layer shrinks to match. The second is a norm's
+affine trading scale with the layer that reads it. [docs/analysis.md](docs/analysis.md) explains
+the rest of the report.
 
 ## How it works
 
 ```mermaid
 flowchart LR
-    model["your model"] --> report["free_scales(model, x)<br/>free directions, dangerous ones,<br/>architecture notes"]
-    report --> plan["suggest(model, x, level)<br/>report / minimal / matrices / absorb"]
-    plan --> apply["ds.apply(model, plan)<br/>unit rows + gain per layer<br/>same output"]
+    model["your model"] --> report["free_scales(model, x)<br/>the free scales, by tensor,<br/>and what the model code could change"]
+    report --> plan["suggest(model, x)<br/>moves norm affines and pair scales,<br/>keeps a gain only where the loss sees it"]
+    plan --> apply["absorb_plan + ds.apply<br/>unit rows times a gain"]
     apply --> train["train as usual<br/>any optimizer"]
     train --> out["session.bake()<br/>stock modules"]
     train --> native["session.canonicalize()<br/>ds.nn modules"]
 ```
 
-A patched layer computes with unit rows times a gain; the architecture notes are what a weight
-patch cannot do, and belong in the model code. The `arch` models in [Measured](#measured) follow
-them: every input enters through a norm without affine, the blocks write the residual stream with
-unit rows and gains, and the output layer reads the stream directly with unit rows and no gain.
-There is no final norm: a norm in front of the output hides the stream's scale from the loss and
-makes it free. In JiT the conditioning and in-context tokens are attended to and never written,
-so they keep the scale they entered with.
+A patch can only change weights. Some free scales come from the model code itself, for example a
+norm in front of the output layer. The report names those, and fixing them is up to you (see
+[the model-side rules](#model-side-rules)).
 
 ## Why scales drift
 
-Give every parameter tensor $\theta_i$ a log-scale $s_i$ and look at the model as a function of
-$\theta_i e^{s_i}$. A **free direction** is a vector $s$ along which the output does not change:
+Give every parameter tensor $\theta_i$ a log-scale $s_i$. A **free scale** is a vector $s$ that
+leaves the output unchanged:
 
 ```math
 f(\theta_1 e^{s_1}, \dots, \theta_n e^{s_n}) = f(\theta_1, \dots, \theta_n).
 ```
 
 Examples: `up` $\times c$ with `down` $\times 1/c$; `q` $\times c$ with `k` $\times 1/c$; a norm's
-gain $\times c$ with every layer that reads it $\times 1/c$; and any weight followed by a norm on
-its own.
+gain $\times c$ with every layer that reads it $\times 1/c$.
 
-The loss is constant along a free direction, so its gradient has no component there. For a weight
-$w$ whose scale is free, $\langle \nabla_w L, w\rangle = 0$, and one step $w' = w - \eta g$ gives
+The loss is constant along a free scale, so its gradient has no component there. For a weight $w$
+whose scale is free on its own, $\langle \nabla_w L, w\rangle = 0$, and one gradient step
+$w' = w - \eta g$ gives
 
 ```math
 \lVert w' \rVert^2 = \lVert w \rVert^2 + \eta^2 \lVert g \rVert^2 \ \ge\ \lVert w \rVert^2 .
 ```
 
-The norm can only grow. With Adam every entry moves about $\eta$ per step whatever its gradient,
-so a row of $n$ entries grows like a random walk, and a matrix row moves about $\sqrt{n}$ times
-faster than a single gain. A free direction is **dangerous** when it moves activations and has a
-matrix in it: that is where the drift is fast and the network sees it.
+The norm can only grow. With Adam every entry moves by about $\eta$ per step whatever its
+gradient, so a row of $n$ entries drifts like a random walk, about $\sqrt{n}$ times faster than a
+single gain. Weight decay pulls the other way. The norm then settles where the two balance, at a
+size set by the learning rate and the decay, not by the loss.
 
 ## What DragonScale changes
 
-A patched layer uses unit rows times a gain in place of its weight:
+A patched layer computes with unit rows in place of its weight:
 
 ```math
-W_{\text{eff}} = \mathrm{diag}(g)\, r\, \frac{W}{\lVert W \rVert_{\text{row}}}
+W_{\text{eff}} = \mathrm{diag}(g)\; r\; \frac{W}{\lVert W \rVert_{\text{row}}}
 ```
 
-with $r$ the row radius (1 for linears and convs, $\sqrt{\text{dim}}$ for embeddings, so their rows
-have unit RMS). The raw row length $\lVert W \rVert_{\text{row}}$ no longer reaches the output, so
-the scale that drifted now lives in $g$: one number per row, moved by a gradient that is aligned
-with the loss instead of by noise. The gradient reaching $W$ is tangent to its rows,
+Here $r$ is a fixed row length: 1 for linears and convs, $\sqrt{\text{dim}}$ for embeddings. The
+raw row length no longer reaches the output, so its drift does nothing. The scale lives in the
+gain $g$, one number per row, which the loss does see. Without weight decay the raw rows still
+grow slowly, and each step turns them a little less: under Adam the turn per step falls as
+$1/\sqrt{t}$ (figure C below).
 
-```math
-\frac{\partial L}{\partial W} = \frac{g\, r}{\lVert W \rVert}\,\bigl(I - \hat w \hat w^\top\bigr)\, \frac{\partial L}{\partial W_{\text{eff}}},
-```
+Where the gains go is the one choice left:
 
-so the raw rows still grow, slowly, and their growth shrinks the effective step of the direction:
-a per-row $1/\sqrt{t}$ schedule.
+| `suggest(..., gains=)` | gain on | free scales left that change a hidden state | output at the start |
+| --- | --- | --- | --- |
+| `"all"` (same as `level="absorb"`) | every patched layer | the stream, through the gains | unchanged |
+| `"selective"` (default) | only where the loss sees the scale | none | changes in the layers that lose their gain |
+| `"none"` | the output layer only, with `output_gain` | none | changes in every layer |
 
-## Analysis
+With the default, the embedding, the output layer, and q and k behind a QK-norm lose their gain.
+Their rows restart at length $r$, so the output at the start changes. In the quick start it
+changes by up to 1.9, against an output RMS of 0.61, and `ds.apply` logs the two layers. That is
+fine for training from scratch. **For a pretrained model**, use `level="absorb"`, which keeps the
+output unchanged, or plan to re-train.
 
-`ds.analysis.free_scales(model, *inputs)` runs one forward pass, follows the scale of every
-parameter through every op, and solves for the free directions. For a one-block pre-norm LM:
+### Model-side rules
 
-```text
-7 free direction(s), 7 dangerous, 6 constraints over 13 groups
-  dangerous: +1*embed.weight +1*pos.weight +1*blocks.0.out.weight +1*blocks.0.down.weight
-  dangerous: +1*blocks.0.norm1.weight -2*blocks.0.k.weight -1*blocks.0.out.weight
-  dangerous: +1*blocks.0.q.weight -1*blocks.0.k.weight
-  dangerous: +1*blocks.0.v.weight -1*blocks.0.out.weight
-  dangerous: +1*blocks.0.norm2.weight -1*blocks.0.gate.weight -1*blocks.0.down.weight
-  dangerous: +1*blocks.0.up.weight -1*blocks.0.down.weight
-  dangerous: +1*norm.weight -1*head.weight
-architecture:
-  attention calls [0]: q and k trade scale freely; normalize q and k (QK-norm) with a gain on one side only
-  embed.weight, pos.weight, blocks.0.out.weight, blocks.0.down.weight scale the residual stream together; give the model input a fixed scale (an embedding: mode 'unit')
-```
+The patch removes every free scale it can reach through weights. The rest needs changes in the
+model code, and the report's notes say which apply:
 
-`gate` and `down` do not trade freely: SiLU pins the scale of `gate`.
+- norms without an affine, or with the affine moved into the next layer (`absorb_plan` does this);
+- every input enters at a fixed scale: an embedding with unit rows, or a norm after a patch
+  embedding;
+- the output layer reads the residual stream directly; a norm in front of it leaves the stream's
+  scale weakly pinned;
+- q and k normalized, with a gain on one side only (`ds.nn.QKNorm`);
+- LayerScale folded into the gain before it (`ds.fold_layerscale`).
 
-`ds.analysis.suggest(model, *inputs, level=...)` turns the report into a plan:
+The patch does not fix every scale. It works per tensor, so it says nothing about how scale is
+spread across the rows or channels of one weight.
 
-| level | plan |
-| --- | --- |
-| `report` | nothing; read the report and its architecture notes |
-| `minimal` | unit rows and a gain only on the layers in a dangerous direction |
-| `matrices` | unit rows and a gain on every Linear / Conv / Embedding |
-| `absorb` | each norm's affine is moved into the layers that read it and frozen; each layer whose row scale can move into the next layer (`v` into `out`, `up` into `down`) gets unit rows without a gain; the rest get unit rows and a gain |
+## Results on small models
 
-Every level keeps the model's output. `absorb` plans carry the moves; run them before applying:
+All figures: a small transformer language model (2 blocks, width 64, byte vocabulary), Adam,
+3,000 steps. Lines are medians over seeds; bands run from the lowest to the highest seed. Data and
+scripts: [docs/figures](docs/figures).
 
-```python
-plan = ds.analysis.suggest(model, x, level="absorb")
-session = ds.apply(model, ds.analysis.absorb_plan(model, plan, x))
-```
+<!-- Figure candidates (owner to choose): delete a candidate's block to drop it. -->
 
-`ds.analysis.absorb(model, source, *inputs, into=None)` makes one move by hand; it finds the
-consumers when `into` is None, refuses a move that is not free, and checks that the output did not
-change. `ds.analysis.scale_jacobian` gives the spectrum of the same scale map numerically.
+<!-- candidate A -->
+<picture><source media="(prefers-color-scheme: dark)" srcset="docs/figures/a_stream_dark.png"><img alt="Hidden-state RMS against learning rate, standard and patched" src="docs/figures/a_stream.png" width="560"></picture>
 
-The architecture notes are what a weight patch cannot do; they belong in the model code.
+**A.** 5 seeds. The standard model's hidden state grows by about 2,500x per 10x learning rate.
+The patched model's stays between 2 and 3.6 up to learning rate 3.2. Crosses: every fp16 AMP run
+of the standard model went non-finite there.
+<!-- end A -->
 
-## Patching options
+<!-- candidate B -->
+<picture><source media="(prefers-color-scheme: dark)" srcset="docs/figures/b_ladder_dark.png"><img alt="Free scales counted by the analysis against hidden-state growth per 10x learning rate, five versions of the model" src="docs/figures/b_ladder.png" width="560"></picture>
 
-Plans are data: `ds.make_plan(model, rules)` matches `ds.Rule(match, **options)` against module
-paths or types, first match wins. `ds.apply` accepts a plan, a rule list or a preset name
-(`unit_gain`, `unit`, `linear_unit_gain`, `conv_unit_gain`, `parametrize_unit_gain`).
+**B.** 5 seeds, five versions of the same model. Growth falls as the free scales that change a
+hidden state are removed, down to 1.1x at zero. Keeping the norm in front of the output layer
+leaves one weakly pinned scale and 7.8x.
+<!-- end B -->
 
-| option | values | meaning |
-| --- | --- | --- |
-| `mode` | `unit_gain`, `unit`, `plain` | unit rows times a gain, unit rows alone, untouched |
-| `gain` | `channel`, `scalar` | one gain per row, or one for the layer |
-| `init` | `preserve`, `ones`, `reset`, `absorb` | gain = row length (same output), gain = 1, re-initialize then preserve, rows already moved by `absorb_plan` |
-| `install` | `forward`, `parametrize`, `bake` | replace the module's forward, a torch parametrization, write the unit-row weight once |
-| `method` | `normalize`, `rescale` | divide by the row length in every forward, or use the raw rows and let the optimizer rescale them after each step |
+<!-- candidate C -->
+<picture><source media="(prefers-color-scheme: dark)" srcset="docs/figures/c_angle_dark.png"><img alt="Angle a unit row turns per step times sqrt(t), against step" src="docs/figures/c_angle.png" width="560"></picture>
 
-Supported layers: Linear, Conv1d/2d/3d, ConvTranspose1d/2d/3d, Embedding and transformers'
-`Conv1D` (GPT-2); `ds.layer_types.register_layer_type` adds more. Tied weights (an LM head shared
-with the embedding) are patched as one layer with one gain.
+**C.** 5 seeds, patched model, AdamW without weight decay. Once its steps are large enough, a unit
+row turns by sqrt((1 - β1) / (1 + β1)) / sqrt(t) per step, whatever the learning rate and the
+initial scale.
+<!-- end C -->
 
-`ds.nn` has the same layers as modules (`UnitRowLinear`, `UnitRowConv2d`, `UnitRowEmbedding`, ...)
-for new models, and `ds.functional.unit_rows(w, spec, gain)` does it for a bare weight.
+<!-- candidate D -->
+<picture><source media="(prefers-color-scheme: dark)" srcset="docs/figures/d_cosine_dark.png"><img alt="Cosine-output model: hidden-state RMS and held-out loss against learning rate" src="docs/figures/d_cosine.png" width="760"></picture>
 
-## Optimizer
+**D.** 5 seeds, with a cosine (scale-invariant) output. Here a gain the loss cannot see is itself
+a free scale: with gains the hidden state still grows, without them it does not, at the same loss.
+<!-- end D -->
 
-`method="normalize"` needs nothing from the optimizer. `method="rescale"` needs the gradient
-decorator, which works with any torch optimizer through its step hooks:
+<!-- candidate E -->
+<picture><source media="(prefers-color-scheme: dark)" srcset="docs/figures/e_fp16_amp_dark.png"><img alt="Held-out loss against learning rate in fp32 and fp16 AMP" src="docs/figures/e_fp16_amp.png" width="560"></picture>
 
-```python
-decorator = ds.optim.attach(optimizer, session)
-```
+**E.** 5 seeds, fp32 and fp16 AMP. From learning rate 0.03, every fp16 AMP run of the standard
+model goes non-finite. The patched model's fp16 AMP runs follow its fp32 runs.
+<!-- end E -->
 
-Before each step it removes the part of each gradient that would change a row's length; after the
-step it removes the same part from the momentum (Adam's `exp_avg`, SGD's and Muon's
-`momentum_buffer`) and rescales each row back to its radius. Second moments are left alone.
+<!-- candidate F -->
+<picture><source media="(prefers-color-scheme: dark)" srcset="docs/figures/f_data_and_shape_dark.png"><img alt="Hidden-state RMS on three data sources, and growth per 10x learning rate for eight widths and depths" src="docs/figures/f_data_and_shape.png" width="760"></picture>
+
+**F.** Left: three Markov data sources of different entropy, 5 seeds. Right: eight widths and
+depths, 3 seeds. The standard model's hidden state grows by 550x to 3,300x per 10x learning rate,
+the patched model's by 1.1x to 1.2x.
+<!-- end F -->
+
+<!-- End of figure candidates. -->
+
+## Kernels and speed
+
+The unit-row op reads a weight and writes one of the same size, so its speed is set by memory
+bandwidth. On CUDA it runs on hand-written Triton kernels. Without Triton it falls back to the
+`torch.compile` version of the op, then to plain torch, and logs one line naming the backend at
+first use. `ds.apply(..., backend=...)` pins one. Under `torch.compile` of the whole model the
+op is traced as plain torch ops and fused with the rest.
+
+<picture><source media="(prefers-color-scheme: dark)" srcset="docs/figures/kernels_dark.png"><img alt="Effective bandwidth of the unit-row op, forward and backward, per backend, on three large weights in fp32, bf16 and fp16" src="docs/figures/kernels.png"></picture>
+
+On large weights the Triton kernels move 5.4 to 6.9 TB/s on an NVIDIA B300, the same as the op
+fused inside a compiled model, and 1.4x to 3.3x the `torch.compile` backend's rate.
+
+<picture><source media="(prefers-color-scheme: dark)" srcset="docs/figures/layer_speed_dark.png"><img alt="Training-step time of a patched layer as a share of the plain layer's, per backend, bf16 AMP" src="docs/figures/layer_speed.png"></picture>
+
+A whole training step of one layer, bf16 AMP. A large matmul hides most of the op (102% and 106%
+with the kernels for 768->3072 and 4096->11008). Small, fast layers do not: in eager mode a 3x3 conv takes 180%, and a stack of 72
+small linears 209%, or 134% with the grouped launch, which computes every weight in a few
+launches (`group=True`, the default). With `torch.compile` of the model the step takes 100% to
+124% of the plain one.
+
+The kernels are as accurate as plain torch. Row lengths are summed in fp32 for every weight
+dtype, so under fp16 AMP and bf16 AMP the norm is computed in fp32. Worst error against an fp64
+reference, over the output and both gradients of seven weight shapes, relative to each row's
+largest entry:
+
+| weight dtype | Triton kernels | `torch.compile` | plain torch (fp32 sums) | plain torch at the weight's dtype |
+| --- | --- | --- | --- | --- |
+| fp32 (the master weights under AMP) | 2.6e-7 | 2.7e-7 | 2.5e-7 | 2.4e-7 |
+| bf16 | 3.9e-3 | 3.9e-3 | 3.9e-3 | 1.3e-2 |
+| fp16 | 4.9e-4 | 4.9e-4 | 4.9e-4 | 1.7e-3 |
+
+Backends, benchmark scripts and where the per-shape numbers are: [docs/kernels.md](docs/kernels.md).
+
+## Training notes
+
+- **Weight decay.** `ds.optim.param_groups(session, weight_decay)` decays the raw weights of
+  patched layers and other matrices, and leaves gains, biases and norm affines alone. Decay on a
+  raw weight does not change the output. It shrinks the raw rows, so later steps turn them
+  further.
+- **Warmup.** The first steps turn a unit row the most (figure C). A short learning-rate warmup
+  limits them.
+- **fp16 AMP and bf16 AMP.** Keep the master weights in fp32 as usual. fp16 AMP needs its
+  gradient scaler, as for any model.
+- **EMA and eval.** In eval mode every forward recomputes the unit rows, so an EMA update or a
+  `load_state_dict` shows up at once. Inside `with session.cache_weights():` they are computed
+  once; call `session.invalidate()` after changing weights there.
+- **Rows that never update.** An embedding row whose token never appears keeps its first value.
+  Row lengths are floored at 1e-12, so a zero row stays zero and finite on every backend.
+
+## Supported layers and limits
+
+- Patched: `Linear`, `Conv1d/2d/3d`, `ConvTranspose1d/2d/3d`, `Embedding`, `MultiheadAttention`,
+  the layers inside `TransformerEncoderLayer`, and transformers' `Conv1D`.
+  `ds.layer_types.register_layer_type` adds more. Tied weights share one gain.
+- Tested with `torch.compile`, `DistributedDataParallel`, FSDP2 (`fully_shard`), `copy.deepcopy`
+  and `torch.save` of the whole model.
+- The analysis traces one forward pass, so control flow that depends on the data is seen only as
+  it ran on the example input. An op without a rule is reported, never guessed, and `suggest`
+  stops unless you pass `allow_unknown=True`.
 
 ## Checkpoints
 
 | call | result |
 | --- | --- |
-| `session.state_dict("raw")` | raw weights and gains, under the module's own keys plus `<path>.gain` |
+| `session.state_dict("raw")` | raw weights and gains |
 | `session.state_dict("baked")` | the unit-row weights under the stock keys; loads into the stock model |
-| `session.bake()` | the model becomes stock modules with the unit-row weights, same output |
-| `session.canonicalize()` | the patched modules become `ds.nn` modules in place (`native` state dict) |
-| `session.remove()` | everything undone; the weights keep what training wrote |
+| `session.bake()` | stock modules with the unit-row weights, same output |
+| `session.canonicalize()` | the patched modules become `ds.nn` modules |
+| `session.remove()` | the patch undone; the weights keep what training wrote |
 
-`load_state_dict(state, format)` reads all three formats. Patched models work with
-`copy.deepcopy`, `torch.save` of the whole model (`forward` install) and FSDP2.
-
-`ds.monitor.Monitor(session)` reads each patched layer's output size, gains and raw row lengths
-during training.
-
-## Kernels and speed
-
-The unit-row op is memory-bound: it reads a weight and writes one of the same size, so its speed
-is its effective bandwidth, the bytes it must move over its time. The Triton kernels read a row
-once when it fits 64 KB. On an 11008 x 4096 weight, forward + backward, they reach 85–96% of the
-card's memory bandwidth, against 54–64% for `torch.compile` and 21–25% for eager. Every fp32
-result matches fp64 to about 1e-7.
-
-![Unit-row forward + backward effective bandwidth per backend on three weight shapes, on a V100, RTX 2080 Ti, 3090 and 4090](docs/assets/kernels.png)
-
-A unit-row Linear against a plain `nn.Linear`, forward + backward with the matmul, fp32 weights
-under fp16 autocast: 96% of the plain layer's speed on a 4096 -> 11008 layer and 99% on 768 ->
-2048, with Triton or `torch.compile`; eager reaches 87% and 96%.
-
-![Unit-row Linear speed as a share of the plain Linear's, per backend, on three layer shapes, on an RTX 2080 Ti, 3090 and 4090](docs/assets/layer_speed.png)
-
-On a 256 -> 768 layer the unit-row launches are a visible share of a 1 ms step where the matmul
-finishes faster than the host launches (73% on the 3090), and hidden where it does not (98% on
-the 2080 Ti). Small layers are bound by launch time, about 0.06 ms per call on an RTX 4090. In eager mode a
-forward pre-hook computes the weights of every eligible layer in one autograd node and a few
-launches (`ds.apply(..., group=True)`, the default); under `torch.compile` the op is traced as
-plain torch ops and fused. Whole training step of the byte-level LM (8 blocks, dim 256, batch
-64 x 256, fp16 AMP) on an RTX 4090:
-
-| preset | eager, per layer | eager, grouped | `torch.compile` |
-| --- | --- | --- | --- |
-| stock | 18.8 ms | 18.8 ms | 15.6 ms |
-| matrices | 30.5 ms | 21.2 ms | 16.6 ms (+6%) |
-| arch | 33.3 ms | 25.5 ms | 16.0 ms (+3%) |
-
-`arch` in eager mode pays for its own extra norms and casts (830 kernel launches against 681);
-compile fuses them. Peak memory under compile: 1.44 GB stock, 1.43 GB matrices, 1.55 GB arch.
-
-| backend | used when | ops |
-| --- | --- | --- |
-| `triton` | CUDA, sm70 and up | every row op, grouped launch |
-| `compile` | CUDA | `torch.compile` of the eager ops |
-| `eager` | always | the reference, fp32 accumulation, fp64 kept |
-
-`ds.apply(model, plan, backend=...)` pins one; by default the fastest available is used.
-Benchmarks: `kogine run measure/ops/speed.py` (the op), `kogine run measure/ops/overhead.py`
-(a layer against the plain layer).
-
-## Measured
-
-These runs check one thing: whether the scales stay put and the loss trains normally. They report
-held-out loss and hidden-state statistics only. All runs are in [`measure/`](measure) and run
-through [kogine](https://github.com/KohakuBlueleaf/KohakuEngine); every number comes from one
-config file.
-
-| preset | what it is |
-| --- | --- |
-| `stock` | the model as written |
-| `matrices` | `suggest(level="matrices")` on the stock model |
-| `arch` | `suggest(level="absorb")` plus the architecture notes done in the model code (see [How it works](#how-it-works)) |
-
-A run **failed** when it diverged or its best held-out loss stayed above 2.0.
-
-### Byte-level LM
-
-A pre-norm transformer (dim 256, 8 blocks, SwiGLU) on the bytes of the Python standard library,
-AdamW, constant learning rate, no weight decay, 5k steps unless stated.
-
-**A: learning rate x precision.**
-
-![Byte-level LM, best held-out loss and peak residual stream against learning rate, fp16 and fp32, per preset](docs/assets/a_lr_precision.png)
-
-| preset | precision | best loss (lr) | largest lr that trains |
-| --- | --- | --- | --- |
-| stock | fp16 | 0.947 (2e-3) | 5e-3 |
-| stock | fp32 | 0.957 (2e-3) | 5e-3 |
-| matrices | fp16 | 0.954 (5e-3) | 5e-2 |
-| matrices | fp32 | 0.955 (5e-3) | 5e-2 |
-| arch | fp16 | 0.930 (5e-3) | 1.0 |
-| arch | fp32 | 0.936 (0.1) | 1.0 |
-
-`arch` trains at every learning rate up to 1.0; past 0.2 its best loss rises (1.05 at 0.5, 1.00
-at 1.0 in fp16). fp32 fails where fp16 does: stock at lr 1e-2 and above ends near loss 2.4 with a stream of 1e6
-to 1e12 in fp32, and diverges in fp16. The precision is not the cause.
-
-**B: longer runs, 16k steps** at lr 2e-3 and 1e-2, fp16.
-
-![Byte-level LM over 16k steps: peak stream, largest raw row length and largest writer gain against step](docs/assets/b_long.png)
-
-| preset | lr 2e-3: best loss, peak stream | lr 1e-2: best loss, peak stream |
-| --- | --- | --- |
-| stock | 0.957, 1,438 | failed at step 1k |
-| matrices | 0.958, 147 | 0.962, 770 |
-| arch | 0.939, 184 | 0.939, 263 |
-
-The corpus is 10.7 MB; past a few thousand steps every preset memorizes it and the held-out loss
-climbs back to 1.1–1.2.
-
-**C and E: depth 4 / 8 / 16 / 32 and width 128 / 256 / 512 / 1024**, peak stream:
-
-<p align="center">
-  <img src="docs/assets/depth.png" width="49%" alt="Byte-level LM, peak stream against depth per preset">
-  <img src="docs/assets/width.png" width="49%" alt="Byte-level LM, peak stream against width per preset">
-</p>
-
-C, depth (best held-out loss):
-
-| preset | lr | depth 4 | depth 8 | depth 16 | depth 32 |
-| --- | --- | --- | --- | --- | --- |
-| stock | 2e-3 | 0.995 | 0.956 | 0.941 | 0.936 |
-| stock | 1e-2 | failed | failed | failed | failed |
-| stock | 5e-2 | failed | failed | failed | failed |
-| matrices | 2e-3 | 0.994 | 0.954 | 0.939 | 0.935 |
-| matrices | 1e-2 | 1.006 | 0.960 | 0.939 | 0.932 |
-| matrices | 5e-2 | 1.110 | 1.147 | 0.991 | failed |
-| arch | 2e-3 | 0.946 | 0.936 | 0.932 | 0.927 |
-| arch | 1e-2 | 0.938 | 0.937 | 0.925 | 0.925 |
-| arch | 5e-2 | 0.943 | 0.953 | 0.938 | 0.925 |
-
-**D: weight decay on stock** (best held-out loss, peak stream).
-
-| weight decay | lr 1e-3 | lr 3e-3 | lr 1e-2 | lr 3e-2 | lr 0.1 |
-| --- | --- | --- | --- | --- | --- |
-| 0.01 | 0.975, 136 | 0.947, 791 | failed | failed | failed |
-| 0.1 | 0.965, 52 | 0.942, 156 | 1.038, 6,790 | 1.299, 25,300 | failed |
-
-Weight decay 0.1 keeps stock training at lr 1e-2 and 3e-2, with the stream still at 7k–25k.
-
-E, width (best held-out loss):
-
-| preset | lr | width 128 | width 256 | width 512 | width 1024 |
-| --- | --- | --- | --- | --- | --- |
-| stock | 2e-3 | 0.990 | 0.955 | 0.948 | failed |
-| stock | 1e-2 | 1.035 | failed | failed | failed |
-| stock | 5e-2 | failed | failed | failed | failed |
-| matrices | 2e-3 | 0.987 | 0.958 | 0.940 | 0.982 |
-| matrices | 1e-2 | 0.977 | 0.967 | 1.121 | 1.187 |
-| matrices | 5e-2 | 0.970 | 1.047 | failed | failed |
-| arch | 2e-3 | 0.970 | 0.938 | 0.932 | 0.953 |
-| arch | 1e-2 | 0.951 | 0.942 | 0.940 | 0.944 |
-| arch | 5e-2 | 0.952 | 0.942 | 0.935 | 0.946 |
-
-Stock's stream grows with width (207, 516, 1,812 at lr 2e-3) and width 1024 diverges at the
-smallest learning rate. `arch` trains at every depth and width at all three learning rates.
-
-**Loss against stream size**, every run of A–E: the frontier per preset (left) and each setup's
-learning-rate sweep as one line (right).
-
-<p align="center">
-  <img src="docs/assets/pareto.png" width="49%" alt="Best held-out loss against peak stream for every byte-level LM run, Pareto frontier per preset">
-  <img src="docs/assets/pareto_setups.png" width="49%" alt="Best held-out loss against peak stream, one line per setup">
-</p>
-
-### JiT-B/16 on Flowers-102
-
-Pixel-space diffusion with the JiT recipe (x-prediction, velocity loss) at 256 px, batch 64, the
-time and class as conditioning tokens, fp16.
-
-![JiT-B/16 at lr 1e-3: image-token stream RMS through depth, and its peak over 2k steps, for stock, arch with a final norm and arch](docs/assets/final_norm.png)
-
-| model, lr 1e-3, 2k steps | stream RMS, block 0 -> 11 | peak | held-out loss |
-| --- | --- | --- | --- |
-| stock | 49 -> 150 | 1,694 | 0.419 |
-| arch with a final norm | 19 -> 93 | 1,239 | 0.425 |
-| arch | 1.4 -> 0.8 | 15 | 0.444 |
-
-A final norm in front of the output makes the stream's scale free, and it grows in the patched
-model as in stock. Without it, and with the context tokens read-only, the stream stays near 1.
-
-![JiT-B/16 over 10k steps per preset and learning rate: held-out velocity loss and peak stream](docs/assets/jit.png)
-
-The loss is compared from step 2k: the first few hundred steps' losses are outliers.
-
-| preset | lr | best held-out loss, steps 2k-10k | peak stream |
-| --- | --- | --- | --- |
-| stock | 2e-4 | 0.264 | 779 |
-| stock | 1e-3 | 0.219 | 4,506 |
-| stock | 3e-3 | 0.247 | 23,804 |
-| matrices | 2e-4 | 0.260 | 710 |
-| matrices | 1e-3 | 0.216 | 1,294 |
-| matrices | 3e-3 | 0.217 | 2,055 |
-| arch | 2e-4 | 0.234 | 29 |
-| arch | 1e-3 | 0.175 | 28 |
-| arch | 3e-3 | 0.183 | 86 |
-
-Over 10k steps stock's stream peaks at 779 to 23,804, rising with the learning rate; `arch` stays
-at 28 to 86, and its held-out loss is the lowest at every learning rate.
-
-Reproduce, for example:
-
-```bash
-kogine run measure/bytelm/train.py --set BUILD_CORPUS=true
-kogine workflow parallel measure/bytelm/train.py --config measure/bytelm/configs/a_stock.py --workers 2
-kogine run measure/plots.py
-```
+Patch options, presets, the `ds.nn` modules and the monitor: [docs/patching.md](docs/patching.md).
 
 ## Repository
 
 | path | contents |
 | --- | --- |
-| `src/dragonscale/` | the library: analysis, plans, patching, the grouped launch, the gradient decorator, unit-row modules |
-| `src/dragonscale.kernels/` | the row ops per backend: eager reference, `torch.compile`, Triton |
-| `src/dragonscale_common/` | helpers shared by both, without torch: logger, name registry, dotted-path import, problem lists |
-| `measure/` | experiments, op benchmarks and figures, one folder each, run with kogine |
-| `tests/` | patch / remove / bake / canonicalize, the grouped launch, and the analysis on hand-checked models |
+| `src/dragonscale/` | the library: analysis, plans, patching, kernels, `ds.nn` modules |
+| `tests/` | the test suite, including the README and docs code blocks |
+| `measure/ops/` | speed, precision and overhead benchmarks of the unit-row op |
+| `docs/` | analysis and patching notes, kernel tables, figures and their data |
 
-## License
+## Citation
+
+To be added.
+
+## Licence
 
 Apache-2.0.

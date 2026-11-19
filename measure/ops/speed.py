@@ -2,9 +2,11 @@
 over timed calls, on weight shapes of common models. Weights in fp32 (the master weights a layer
 reads under fp16 AMP or bf16 AMP), bf16 and fp16.
 
-The op is memory-bound: it reads the weight and writes one of the same size. `gb_s` is the bytes
-the forward and backward must move (read w, gain, grad; write out, norms, grad_w, grad_gain)
-over their time.
+Two times per call: the wall time by CUDA events (`*_ms`, includes the host's launch time, which
+bounds these ops on a fast GPU) and the GPU time of the kernels alone (`gpu_*_ms`, profiler). The
+op is memory-bound: it reads the weight and writes one of the same size. `gb_s` is the bytes the
+forward and backward must move (read w, gain, grad; write out, norms, grad_w, grad_gain) over
+their GPU time.
 
     python measure/ops/speed.py --out runs/bench
 """
@@ -13,7 +15,7 @@ import argparse
 from pathlib import Path
 
 import torch
-from common import DTYPES, median_ms, paths, unit_rows_fn, write
+from common import DTYPES, device_ms, median_ms, paths, unit_rows_fn, write
 
 from dragonscale.spec import defaults
 
@@ -46,6 +48,7 @@ def measure(name: str, dtype: str, path: str, device: str) -> dict:
         torch.autograd.grad(out, (w, gain), grad)
 
     fwd, total = median_ms(forward), median_ms(both)
+    gpu_fwd, gpu_total = device_ms(forward), device_ms(both)
     weight = w.numel() * w.element_size()
     rows = gain.numel() * (gain.element_size() + 4)
     moved = 5 * weight + 3 * rows
@@ -55,7 +58,9 @@ def measure(name: str, dtype: str, path: str, device: str) -> dict:
         "path": path,
         "fwd_ms": fwd,
         "fwd_bwd_ms": total,
-        "gb_s": moved / total / 1e6,
+        "gpu_fwd_ms": gpu_fwd,
+        "gpu_fwd_bwd_ms": gpu_total,
+        "gb_s": moved / gpu_total / 1e6,
     }
 
 
@@ -68,11 +73,13 @@ def main() -> None:
     for name in SHAPES:
         for dtype in DTYPES:
             group = [measure(name, dtype, p, args.device) for p in paths(args.device)]
-            best = min(r["fwd_bwd_ms"] for r in group)
-            for r in group:
-                r["vs_best"] = r["fwd_bwd_ms"] / best
+            for key in ("fwd_bwd_ms", "gpu_fwd_bwd_ms"):
+                best = min(r[key] for r in group)
+                for r in group:
+                    r[f"{key}_vs_best"] = r[key] / best
             rows += group
-    columns = ["shape", "dtype", "path", "fwd_ms", "fwd_bwd_ms", "vs_best", "gb_s"]
+    columns = ["shape", "dtype", "path", "fwd_ms", "fwd_bwd_ms", "fwd_bwd_ms_vs_best", "gpu_fwd_ms"]
+    columns += ["gpu_fwd_bwd_ms", "gpu_fwd_bwd_ms_vs_best", "gb_s"]
     write(rows, args.out, "speed", columns)
 
 

@@ -1,0 +1,88 @@
+case,precision,setting,plain_ms,patched_ms,overhead,gpu
+"linear 768->3072, 16k tokens",fp32,"eager, triton",4.40061,4.41526,0.00333046,NVIDIA B300
+"linear 768->3072, 16k tokens",fp32,"eager, compile",4.39981,4.41482,0.00341105,NVIDIA B300
+"linear 768->3072, 16k tokens",fp32,"eager, eager",4.39891,4.49088,0.020907,NVIDIA B300
+"linear 768->3072, 16k tokens",fp32,torch.compile,4.38429,4.39661,0.00281004,NVIDIA B300
+"linear 768->3072, 16k tokens",bf16 AMP,"eager, triton",0.776736,0.78912,0.0159436,NVIDIA B300
+"linear 768->3072, 16k tokens",bf16 AMP,"eager, compile",0.776864,0.789472,0.0162293,NVIDIA B300
+"linear 768->3072, 16k tokens",bf16 AMP,"eager, eager",0.777056,0.863904,0.111765,NVIDIA B300
+"linear 768->3072, 16k tokens",bf16 AMP,torch.compile,0.75632,0.756416,0.000126961,NVIDIA B300
+"linear 768->3072, 16k tokens",fp16 AMP,"eager, triton",0.787104,0.801376,0.0181323,NVIDIA B300
+"linear 768->3072, 16k tokens",fp16 AMP,"eager, compile",0.78688,0.801344,0.0183814,NVIDIA B300
+"linear 768->3072, 16k tokens",fp16 AMP,"eager, eager",0.787264,0.875104,0.111576,NVIDIA B300
+"linear 768->3072, 16k tokens",fp16 AMP,torch.compile,0.768448,0.768672,0.000291489,NVIDIA B300
+"linear 3072->768, 16k tokens",fp32,"eager, triton",4.0464,4.06131,0.00368528,NVIDIA B300
+"linear 3072->768, 16k tokens",fp32,"eager, compile",4.0464,4.06285,0.00406485,NVIDIA B300
+"linear 3072->768, 16k tokens",fp32,"eager, eager",4.04643,4.14669,0.0247764,NVIDIA B300
+"linear 3072->768, 16k tokens",fp32,torch.compile,4.02746,4.04182,0.00356753,NVIDIA B300
+"linear 3072->768, 16k tokens",bf16 AMP,"eager, triton",0.514464,0.634464,0.233252,NVIDIA B300
+"linear 3072->768, 16k tokens",bf16 AMP,"eager, compile",0.514624,0.80704,0.568213,NVIDIA B300
+"linear 3072->768, 16k tokens",bf16 AMP,"eager, eager",0.514752,0.755264,0.467239,NVIDIA B300
+"linear 3072->768, 16k tokens",bf16 AMP,torch.compile,0.485728,0.51936,0.0692404,NVIDIA B300
+"linear 3072->768, 16k tokens",fp16 AMP,"eager, triton",0.523168,0.675424,0.291027,NVIDIA B300
+"linear 3072->768, 16k tokens",fp16 AMP,"eager, compile",0.522848,0.639616,0.223331,NVIDIA B300
+"linear 3072->768, 16k tokens",fp16 AMP,"eager, eager",0.523072,0.62016,0.185611,NVIDIA B300
+"linear 3072->768, 16k tokens",fp16 AMP,torch.compile,0.496192,0.54688,0.102154,NVIDIA B300
+"linear 4096->11008, 8k tokens",fp32,"eager, triton",34.5608,34.7008,0.00405081,NVIDIA B300
+"linear 4096->11008, 8k tokens",fp32,"eager, compile",34.5595,34.7038,0.00417603,NVIDIA B300
+"linear 4096->11008, 8k tokens",fp32,"eager, eager",34.5658,35.3855,0.0237146,NVIDIA B300
+"linear 4096->11008, 8k tokens",fp32,torch.compile,34.5769,34.7142,0.00397314,NVIDIA B300
+"linear 4096->11008, 8k tokens",bf16 AMP,"eager, triton",2.52573,2.66707,0.0559617,NVIDIA B300
+"linear 4096->11008, 8k tokens",bf16 AMP,"eager, compile",2.50115,3.17408,0.269047,NVIDIA B300
+"linear 4096->11008, 8k tokens",bf16 AMP,"eager, eager",2.48509,3.35718,0.350932,NVIDIA B300
+"linear 4096->11008, 8k tokens",bf16 AMP,torch.compile,2.52563,2.56064,0.0138612,NVIDIA B300
+"linear 4096->11008, 8k tokens",fp16 AMP,"eager, triton",2.63744,2.76941,0.0500364,NVIDIA B300
+"linear 4096->11008, 8k tokens",fp16 AMP,"eager, compile",2.58006,3.28038,0.271435,NVIDIA B300
+"linear 4096->11008, 8k tokens",fp16 AMP,"eager, eager",2.58931,3.4879,0.347039,NVIDIA B300
+"linear 4096->11008, 8k tokens",fp16 AMP,torch.compile,2.62499,2.67302,0.018298,NVIDIA B300
+"embedding 50304x768, 16k tokens",fp32,"eager, triton",0.503424,0.615968,0.223557,NVIDIA B300
+"embedding 50304x768, 16k tokens",fp32,"eager, compile",0.503584,1.05642,1.09779,NVIDIA B300
+"embedding 50304x768, 16k tokens",fp32,"eager, eager",0.499328,1.22099,1.44527,NVIDIA B300
+"embedding 50304x768, 16k tokens",fp32,torch.compile,0.293152,0.344672,0.175745,NVIDIA B300
+"embedding 50304x768, 16k tokens",bf16 AMP,"eager, triton",0.489696,0.61312,0.252042,NVIDIA B300
+"embedding 50304x768, 16k tokens",bf16 AMP,"eager, compile",0.503776,1.05626,1.09668,NVIDIA B300
+"embedding 50304x768, 16k tokens",bf16 AMP,"eager, eager",0.499264,1.22317,1.44994,NVIDIA B300
+"embedding 50304x768, 16k tokens",bf16 AMP,torch.compile,0.305792,0.356928,0.167225,NVIDIA B300
+"embedding 50304x768, 16k tokens",fp16 AMP,"eager, triton",0.497696,0.621984,0.249727,NVIDIA B300
+"embedding 50304x768, 16k tokens",fp16 AMP,"eager, compile",0.511456,1.0647,1.08171,NVIDIA B300
+"embedding 50304x768, 16k tokens",fp16 AMP,"eager, eager",0.5064,1.23037,1.42964,NVIDIA B300
+"embedding 50304x768, 16k tokens",fp16 AMP,torch.compile,0.322112,0.377472,0.171866,NVIDIA B300
+"conv 3x3 256, 8x64x64",fp32,"eager, triton",0.466752,0.581184,0.245167,NVIDIA B300
+"conv 3x3 256, 8x64x64",fp32,"eager, compile",0.466592,0.589344,0.263082,NVIDIA B300
+"conv 3x3 256, 8x64x64",fp32,"eager, eager",0.466496,0.545888,0.170188,NVIDIA B300
+"conv 3x3 256, 8x64x64",fp32,torch.compile,0.488,0.520672,0.0669509,NVIDIA B300
+"conv 3x3 256, 8x64x64",bf16 AMP,"eager, triton",0.383136,0.688096,0.795958,NVIDIA B300
+"conv 3x3 256, 8x64x64",bf16 AMP,"eager, compile",0.38176,0.725696,0.900922,NVIDIA B300
+"conv 3x3 256, 8x64x64",bf16 AMP,"eager, eager",0.383488,0.61984,0.616322,NVIDIA B300
+"conv 3x3 256, 8x64x64",bf16 AMP,torch.compile,0.561696,0.62016,0.104085,NVIDIA B300
+"conv 3x3 256, 8x64x64",fp16 AMP,"eager, triton",0.38768,0.726912,0.875031,NVIDIA B300
+"conv 3x3 256, 8x64x64",fp16 AMP,"eager, compile",0.388256,0.77328,0.991676,NVIDIA B300
+"conv 3x3 256, 8x64x64",fp16 AMP,"eager, eager",0.387808,0.653728,0.6857,NVIDIA B300
+"conv 3x3 256, 8x64x64",fp16 AMP,torch.compile,0.60064,0.700032,0.165477,NVIDIA B300
+"depthwise 7x7 768, 32x14x14",fp32,"eager, triton",0.840384,0.852384,0.0142791,NVIDIA B300
+"depthwise 7x7 768, 32x14x14",fp32,"eager, compile",0.841312,0.88464,0.0515005,NVIDIA B300
+"depthwise 7x7 768, 32x14x14",fp32,"eager, eager",0.841408,0.909888,0.0813874,NVIDIA B300
+"depthwise 7x7 768, 32x14x14",fp32,torch.compile,0.846304,0.854496,0.00967974,NVIDIA B300
+"depthwise 7x7 768, 32x14x14",bf16 AMP,"eager, triton",0.930368,0.940288,0.0106624,NVIDIA B300
+"depthwise 7x7 768, 32x14x14",bf16 AMP,"eager, compile",0.930368,0.971648,0.0443695,NVIDIA B300
+"depthwise 7x7 768, 32x14x14",bf16 AMP,"eager, eager",0.930368,0.996832,0.0714384,NVIDIA B300
+"depthwise 7x7 768, 32x14x14",bf16 AMP,torch.compile,0.930368,0.928384,-0.00213249,NVIDIA B300
+"depthwise 7x7 768, 32x14x14",fp16 AMP,"eager, triton",0.934688,0.94272,0.00859327,NVIDIA B300
+"depthwise 7x7 768, 32x14x14",fp16 AMP,"eager, compile",0.934592,0.977984,0.0464288,NVIDIA B300
+"depthwise 7x7 768, 32x14x14",fp16 AMP,"eager, eager",0.936512,0.999744,0.0675186,NVIDIA B300
+"depthwise 7x7 768, 32x14x14",fp16 AMP,torch.compile,0.938656,0.93776,-0.000954532,NVIDIA B300
+"stack of 72 linears (12 blocks, dim 768), 4k tokens",fp32,"eager, triton",42.8925,43.6289,0.0171666,NVIDIA B300
+"stack of 72 linears (12 blocks, dim 768), 4k tokens",fp32,"eager, compile",42.8845,45.7194,0.0661042,NVIDIA B300
+"stack of 72 linears (12 blocks, dim 768), 4k tokens",fp32,"eager, eager",42.9013,49.0291,0.142834,NVIDIA B300
+"stack of 72 linears (12 blocks, dim 768), 4k tokens",fp32,"eager, grouped",42.897,43.5287,0.0147256,NVIDIA B300
+"stack of 72 linears (12 blocks, dim 768), 4k tokens",fp32,torch.compile,41.5862,40.0654,-0.0365699,NVIDIA B300
+"stack of 72 linears (12 blocks, dim 768), 4k tokens",bf16 AMP,"eager, triton",10.8372,22.6088,1.08622,NVIDIA B300
+"stack of 72 linears (12 blocks, dim 768), 4k tokens",bf16 AMP,"eager, compile",10.765,24.5688,1.28229,NVIDIA B300
+"stack of 72 linears (12 blocks, dim 768), 4k tokens",bf16 AMP,"eager, eager",10.7449,23.7483,1.21019,NVIDIA B300
+"stack of 72 linears (12 blocks, dim 768), 4k tokens",bf16 AMP,"eager, grouped",10.6702,14.2345,0.334038,NVIDIA B300
+"stack of 72 linears (12 blocks, dim 768), 4k tokens",bf16 AMP,torch.compile,5.67693,7.02099,0.236759,NVIDIA B300
+"stack of 72 linears (12 blocks, dim 768), 4k tokens",fp16 AMP,"eager, triton",10.8465,22.6695,1.09002,NVIDIA B300
+"stack of 72 linears (12 blocks, dim 768), 4k tokens",fp16 AMP,"eager, compile",10.8325,24.9613,1.30429,NVIDIA B300
+"stack of 72 linears (12 blocks, dim 768), 4k tokens",fp16 AMP,"eager, eager",10.811,24.0462,1.22423,NVIDIA B300
+"stack of 72 linears (12 blocks, dim 768), 4k tokens",fp16 AMP,"eager, grouped",10.7681,14.3099,0.328914,NVIDIA B300
+"stack of 72 linears (12 blocks, dim 768), 4k tokens",fp16 AMP,torch.compile,5.74246,7.0585,0.229175,NVIDIA B300

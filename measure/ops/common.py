@@ -61,6 +61,23 @@ def median_ms(fn, rounds: int = 50, warmup: int = 10) -> float:
     return times[len(times) // 2]
 
 
+def device_ms(fn, rounds: int = 20, warmup: int = 5) -> float:
+    """GPU time of one call of `fn` in milliseconds: the sum of its CUDA kernels' durations from
+    the profiler, over `rounds` calls. Unlike `median_ms` it leaves out the host's launch time,
+    which bounds small ops on a fast GPU."""
+    from torch.profiler import ProfilerActivity, profile
+
+    for _ in range(warmup):
+        fn()
+    torch.cuda.synchronize()
+    with profile(activities=[ProfilerActivity.CUDA]) as prof:
+        for _ in range(rounds):
+            fn()
+        torch.cuda.synchronize()
+    total_us = sum(e.self_device_time_total for e in prof.key_averages())
+    return total_us / rounds / 1e3
+
+
 def table(rows: list[dict], columns: list[str]) -> str:
     """A markdown table; floats in 4 significant digits."""
 
