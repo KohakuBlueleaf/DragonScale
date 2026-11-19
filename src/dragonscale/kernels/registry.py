@@ -14,6 +14,7 @@ from dragonscale.kernels.hardware import arch_of
 from dragonscale.log import get_logger
 
 BACKENDS = ("triton", "compile", "eager")
+ANNOUNCE = ("unit_rows", "unit_rows_grouped")
 log = get_logger("kernels")
 
 
@@ -71,15 +72,24 @@ def _pick(op: str, backend: str, arch: str) -> tuple[Impl | None, str]:
     return None, "; ".join(reasons) or "not implemented"
 
 
+ANNOUNCED: set[tuple[str, str]] = set()
+
+
 def resolve(op: str, device: torch.device | str, backend: str | None = None) -> Callable:
-    """The implementation of `op` on `device`; a pinned `backend` is the only option."""
+    """The implementation of `op` on `device`; a pinned `backend` is the only option. The first
+    choice by priority per (op, device type) is logged once, with the reasons of every backend
+    passed over."""
     load_backends()
     arch = arch_of(device)
     reasons = []
     for name in (backend,) if backend else BACKENDS:
         impl, why = _pick(op, name, arch)
         if impl is not None:
-            log.debug("kernel bound", op=op, arch=arch, backend=name)
+            key = (op, arch)
+            if backend is None and key not in ANNOUNCED and op in ANNOUNCE:
+                ANNOUNCED.add(key)
+                skipped = f" ({'; '.join(reasons)})" if reasons else ""
+                log.info(f"dragonscale: {op} on {arch} runs on the {name} backend{skipped}")
             return impl.fn
         reasons.append(f"{name}: {why}")
     raise NoImplementationError(f"{op} on {arch}: " + "; ".join(reasons))

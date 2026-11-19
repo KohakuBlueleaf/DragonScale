@@ -15,7 +15,7 @@ from dragonscale.patch.layerscale import fold_layerscale
 from dragonscale.plan import PRESETS, LayerPlan, Plan, Rule, make_plan, preset, validate
 from dragonscale.spec import RowSpec, defaults
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "PRESETS",

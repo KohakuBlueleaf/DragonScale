@@ -1,125 +1,79 @@
-"""Speed of the unit-row ops per backend: forward (`unit_rows`) and backward (`unit_rows_bwd`),
-median over `ROUNDS` timed calls, for layer shapes from the experiments and a large LM.
+"""Speed of the unit-row op per path: forward, and forward + backward through autograd, median
+over timed calls, on weight shapes of common models. Weights in fp32 (the master weights a layer
+reads under fp16 AMP or bf16 AMP), bf16 and fp16.
 
-Both ops are memory-bound, so speed is reported as effective bandwidth: the bytes an op must move
-divided by its time, and that as a share of the card's peak (`PEAK_GB_S`). The forward reads w and
-gain and writes out and norms; the backward reads grad, w, norms and gain and writes grad_w and
-grad_gain.
+The op is memory-bound: it reads the weight and writes one of the same size. `gb_s` is the bytes
+the forward and backward must move (read w, gain, grad; write out, norms, grad_w, grad_gain)
+over their time.
 
-    kogine run measure/ops/speed.py
-    kogine run measure/ops/speed.py --set DTYPE=bf16
-
-Weights are fp32 by default: the master weights a patched layer reads under autocast.
+    python measure/ops/speed.py --out runs/bench
 """
 
-import sys
+import argparse
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
 import torch
-from common import append_row, run_dir, table
+from common import DTYPES, median_ms, paths, unit_rows_fn, write
 
-from dragonscale.kernels import available, ops, resolve
-from dragonscale.kernels.registry import load_backends
 from dragonscale.spec import defaults
 
-DEVICE = "cuda:0"
-DTYPE = "fp32"  # "fp32" | "bf16" | "fp16"
-ROUNDS = 200
-WARMUP = 20
-DTYPES = {"fp32": torch.float32, "bf16": torch.bfloat16, "fp16": torch.float16}
-PEAK_GB_S = {  # spec memory bandwidth
-    "NVIDIA GeForce RTX 4090": 1008,
-    "NVIDIA GeForce RTX 3090": 936,
-    "NVIDIA GeForce RTX 2080 Ti": 616,
-    "Tesla V100-SXM2-16GB": 900,
-    "Tesla PG503-216": 900,
-}
 SHAPES = {
-    "byte LM qkv/out 256x256": (256, 256),
-    "byte LM gate/up 768x256": (768, 256),
-    "byte LM down 256x768": (256, 768),
-    "JiT q/k/v/proj 768x768": (768, 768),
-    "JiT gate/up 2048x768": (2048, 768),
-    "JiT down 768x2048": (768, 2048),
-    "LM 4096x4096": (4096, 4096),
-    "LM up 11008x4096": (11008, 4096),
-    "LM down 4096x11008": (4096, 11008),
-    "embedding 32000x4096": (32000, 4096),
+    "linear 768x768": ((768, 768), defaults.rows()),
+    "linear 3072x768": ((3072, 768), defaults.rows()),
+    "linear 768x3072": ((768, 3072), defaults.rows()),
+    "linear 4096x4096": ((4096, 4096), defaults.rows()),
+    "linear 11008x4096": ((11008, 4096), defaults.rows()),
+    "embedding 50304x768": ((50304, 768), defaults.embedding()),
+    "conv 256x256x3x3": ((256, 256, 3, 3), defaults.rows()),
+    "depthwise 768x1x7x7": ((768, 1, 7, 7), defaults.rows()),
 }
 
 
-def median_ms(fn) -> float:
-    for _ in range(WARMUP):
-        fn()
-    starts = [torch.cuda.Event(enable_timing=True) for _ in range(ROUNDS)]
-    ends = [torch.cuda.Event(enable_timing=True) for _ in range(ROUNDS)]
-    for start, end in zip(starts, ends, strict=True):
-        start.record()
-        fn()
-        end.record()
-    torch.cuda.synchronize()
-    times = sorted(s.elapsed_time(e) for s, e in zip(starts, ends, strict=True))
-    return times[len(times) // 2]
-
-
-def measure(name: str, shape: tuple[int, ...], dtype: torch.dtype, backend: str) -> dict:
-    spec = defaults.embedding() if name.startswith("embedding") else defaults.rows()
-    view, row_dims, radius = spec.view_of(shape), tuple(spec.row_dims), spec.radius_of(shape)
-    w = torch.randn(shape, device=DEVICE, dtype=dtype)
-    gain = torch.rand(spec.rows(shape), device=DEVICE, dtype=dtype) + 0.5
+def measure(name: str, dtype: str, path: str, device: str) -> dict:
+    shape, spec = SHAPES[name]
+    w = torch.randn(shape, device=device, dtype=DTYPES[dtype], requires_grad=True)
+    gain = torch.rand(spec.rows(shape), device=device, dtype=DTYPES[dtype]) + 0.5
+    gain.requires_grad_(True)
     grad = torch.randn_like(w)
-    fwd = resolve(ops.UNIT_ROWS, DEVICE, backend)
-    bwd = resolve(ops.UNIT_ROWS_BWD, DEVICE, backend)
-    _, norms = fwd(w, view, row_dims, gain, radius)
-    fwd_ms = median_ms(lambda: fwd(w, view, row_dims, gain, radius))
-    bwd_ms = median_ms(lambda: bwd(grad, w, view, row_dims, norms, gain, radius))
+    fn = unit_rows_fn(path, spec, shape, device)
+
+    def forward():
+        with torch.no_grad():
+            fn(w, gain)
+
+    def both():
+        out = fn(w, gain)
+        torch.autograd.grad(out, (w, gain), grad)
+
+    fwd, total = median_ms(forward), median_ms(both)
     weight = w.numel() * w.element_size()
-    rows = gain.numel() * gain.element_size() + norms.numel() * norms.element_size()
-    fwd_bytes = 2 * weight + rows
-    bwd_bytes = 3 * weight + 2 * rows
-    peak = PEAK_GB_S.get(torch.cuda.get_device_name(DEVICE))
-    fwd_gb_s = fwd_bytes / fwd_ms / 1e6
-    bwd_gb_s = bwd_bytes / bwd_ms / 1e6
+    rows = gain.numel() * (gain.element_size() + 4)
+    moved = 5 * weight + 3 * rows
     return {
-        "case": name,
-        "backend": backend,
-        "dtype": DTYPE,
-        "fwd_ms": fwd_ms,
-        "bwd_ms": bwd_ms,
-        "total_ms": fwd_ms + bwd_ms,
-        "fwd_gb_s": fwd_gb_s,
-        "bwd_gb_s": bwd_gb_s,
-        "fwd_peak": fwd_gb_s / peak if peak else None,
-        "bwd_peak": bwd_gb_s / peak if peak else None,
+        "shape": name,
+        "dtype": dtype,
+        "path": path,
+        "fwd_ms": fwd,
+        "fwd_bwd_ms": total,
+        "gb_s": moved / total / 1e6,
     }
 
 
 def main() -> None:
-    torch.cuda.set_device(DEVICE)  # the timing events record on the current device
-    load_backends()
-    dtype = DTYPES[DTYPE]
-    backends = available(ops.UNIT_ROWS, DEVICE)
-    gpu = torch.cuda.get_device_name(DEVICE)
-    out = run_dir("speed") / f"{gpu.replace(' ', '_')}-{DTYPE}.jsonl"
-    out.unlink(missing_ok=True)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--device", default="cuda")
+    parser.add_argument("--out", type=Path, default=Path("runs/bench"))
+    args = parser.parse_args()
     rows = []
-    for name, shape in SHAPES.items():
-        by_backend = {}
-        for backend in backends:
-            row = {**measure(name, shape, dtype, backend), "gpu": gpu}
-            append_row(out, row)
-            by_backend[backend] = row
-        best = min(by_backend.values(), key=lambda r: r["total_ms"])
-        for row in by_backend.values():
-            row["vs_best"] = row["total_ms"] / best["total_ms"]
-            rows.append(row)
-    print(gpu)
-    columns = ["case", "backend", "fwd_ms", "bwd_ms", "vs_best", "fwd_gb_s", "bwd_gb_s"]
-    columns += ["fwd_peak", "bwd_peak"]
-    print(table(rows, columns))
-    print(f"\nrows: {out}")
+    for name in SHAPES:
+        for dtype in DTYPES:
+            group = [measure(name, dtype, p, args.device) for p in paths(args.device)]
+            best = min(r["fwd_bwd_ms"] for r in group)
+            for r in group:
+                r["vs_best"] = r["fwd_bwd_ms"] / best
+            rows += group
+    columns = ["shape", "dtype", "path", "fwd_ms", "fwd_bwd_ms", "vs_best", "gb_s"]
+    write(rows, args.out, "speed", columns)
 
 
 if __name__ == "__main__":

@@ -174,9 +174,13 @@ def test_never_updated_rows_stay_finite_on_every_backend(device):
             assert torch.isfinite(t).all(), backend
 
 
+COMPILE_CASES = [(d, b) for d in DEVICES for b in (None, "eager")]
+if "cuda" in DEVICES and "triton" in available(ops.UNIT_ROWS, "cuda"):
+    COMPILE_CASES.append(("cuda", "triton"))
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="Inductor needs a C++ compiler")
-@pytest.mark.parametrize("device", DEVICES)
-@pytest.mark.parametrize("backend", [None, "eager"])
+@pytest.mark.parametrize("device,backend", COMPILE_CASES)
 def test_compiled_patched_model_matches_eager(device, backend):
     """`torch.compile` of a patched model (plain torch ops for the default backend, the library's
     custom op for a pinned one) gives the eager output and gradients, including the zero rows."""

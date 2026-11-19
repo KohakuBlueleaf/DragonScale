@@ -278,3 +278,21 @@ def test_a_biased_layer_read_by_a_norm():
     plan = suggest(model, x, level="absorb")
     assert "conv" not in dict(plan.moves)
     assert next(p for p in plan if p.path == "conv").mode == "unit_gain"
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="kernel backends run on CUDA")
+def test_trace_on_cuda_matches_the_cpu():
+    """With the Triton kernels as the default on CUDA, the analysis of a patched model gives the
+    same free scales as on the CPU."""
+    from tests.models import LM, tokens
+
+    reports = []
+    for device in ("cpu", "cuda"):
+        torch.manual_seed(0)
+        model = LM(depth=1).to(device)
+        ds.apply(model, "unit_gain")
+        reports.append(free_scales(model, tokens().to(device)))
+    assert reports[0].summary() == reports[1].summary()
+    assert torch.allclose(
+        reports[0].basis @ reports[0].basis.T, reports[1].basis @ reports[1].basis.T
+    )
