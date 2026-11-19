@@ -36,12 +36,28 @@ def row_norms(w: Tensor, spec: RowSpec) -> Tensor:
     return out.reshape(-1)
 
 
+def floored_norms(v: Tensor, dims: tuple[int, ...]) -> Tensor:
+    """Row norms of the wide view `v` over `dims` (kept as size-1 axes), floored at `FLOOR`, with a
+    finite autograd gradient for every row.
+
+    `sqrt` has an infinite derivative at 0, and the floor passes a zero gradient below it, so
+    `sum(v^2).sqrt().clamp_min(FLOOR)` gives 0 * inf = NaN once a row's sum of squares underflows
+    to 0. That happens to a row that weight decay shrinks without updates: in fp32 near
+    exp(-50) of its start norm. Flooring the sum of squares at `FLOOR^2` first keeps the
+    derivative finite; for every row with a norm above `FLOOR` the value and the gradient are
+    unchanged."""
+    if not dims:
+        return v.abs().clamp_min(ops.FLOOR)
+    return v.square().sum(dims, keepdim=True).clamp_min(ops.FLOOR**2).sqrt().clamp_min(ops.FLOOR)
+
+
 def reference(w: Tensor, spec: RowSpec, gain: Tensor | None = None) -> Tensor:
     """`gain * radius * w / norm` per row in plain torch ops."""
     view = spec.view_of(w.shape)
     rows = spec.rows(w.shape)
     v = wide(w).reshape(view)
-    scale = spec.radius_of(w.shape) / row_norms(w, spec).clamp_min(ops.FLOOR)
+    norms = floored_norms(v, reduced(view, spec.row_dims)).reshape(-1)
+    scale = spec.radius_of(w.shape) / norms
     gain = _gain_rows(gain, rows)
     if gain is not None:
         scale = scale * gain.to(scale.dtype)
@@ -144,9 +160,7 @@ def compiled_unit_rows(
     Inductor to fuse and differentiate; the opaque custom op for a pinned kernel backend."""
     if backend in (None, "compile"):
         v = wide(w).reshape(view)
-        dims = reduced(view, row_dims)
-        norms = v.square().sum(dims, keepdim=True).sqrt() if dims else v.abs()
-        scale = radius / norms.clamp_min(ops.FLOOR)
+        scale = radius / floored_norms(v, reduced(view, row_dims))
         if gain is not None:
             scale = scale * as_rows(gain.to(v.dtype), view, row_dims)
         return (v * scale).to(w.dtype).reshape(w.shape)
