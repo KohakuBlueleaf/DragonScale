@@ -3,8 +3,8 @@
 
 - `kernels.png`: the unit-row op's forward + backward per path, effective bandwidth from the GPU
   time of its kernels, on three large weights, fp32 / bf16 / fp16 weights;
-- `layer_speed.png`: training-step time of a patched layer over the plain layer, bf16 AMP, per
-  setting.
+- `layer_speed.png`: how much slower a patched layer's training step is than the plain layer's,
+  bf16 AMP, per setting.
 
 Writes light and dark PNGs next to this file.
 
@@ -83,12 +83,12 @@ def overhead(theme: str):
             r = next((r for r in data if r["case"] == case and r["setting"] == setting), None)
             if r:
                 xs.append(j + (i - 2) * width)
-                ys.append(100 * (1 + r["overhead"]))
+                ys.append(100 * r["overhead"])
         ax.bar(xs, ys, width, color=color(theme, slot), label=label)
-    ax.axhline(100, color=t["ink"], ls="--", lw=1)
+    ax.axhline(0, color=t["ink"], lw=1)
     ax.set_xticks(range(len(cases)), [c.replace(", ", ",\n") for c in cases], fontsize=7.5)
-    ax.set_ylabel("step time, % of the plain model")
-    ax.set_ylim(80, None)
+    ax.set_ylabel("slower than the plain layer, %")
+    ax.set_ylim(-5, None)
     ax.grid(axis="x", visible=False)
     ax.legend(loc="upper left", ncol=3)
     fig.text(0.5, -0.03, f"forward + backward, bf16 AMP, fp32 weights, {gpu}", ha="center", fontsize=8,

@@ -27,9 +27,9 @@ scale. After the patch, no free scale changes a hidden state.
   a language model, a diffusion transformer, a ViT student and a ConvNeXt student.
 - **Keeps the hidden state in place.** On a small language model with Adam, the standard model's
   hidden state grows about 2,500x for every 10x in learning rate; the patched model's grows 1.1x.
-- **Hand-written Triton kernels by default.** On an NVIDIA B300 the unit-row op is 1.3x to 11x
+- **Hand-written Triton kernels by default.** On an NVIDIA B300 the unit-row op is 1.3x to 12x
   faster than its `torch.compile` version (GPU time, 8 weight shapes, 3 dtypes). With
-  `torch.compile` of the whole model, a patched layer's training step takes 100% to 124% of the
+  `torch.compile` of the whole model, a patched layer's training step is 0 to 23% slower than the
   plain layer's.
 - **fp16 AMP and bf16 AMP.** Row lengths are summed in fp32, and every backend matches an fp64
   reference to the rounding of the weight's own dtype.
@@ -247,16 +247,21 @@ op is traced as plain torch ops and fused with the rest.
 
 <picture><source media="(prefers-color-scheme: dark)" srcset="docs/figures/kernels_dark.png"><img alt="Effective bandwidth of the unit-row op, forward and backward, per backend, on three large weights in fp32, bf16 and fp16" src="docs/figures/kernels.png"></picture>
 
-On large weights the Triton kernels move 5.4 to 6.9 TB/s on an NVIDIA B300, the same as the op
-fused inside a compiled model, and 1.4x to 3.3x the `torch.compile` backend's rate.
+On large weights the Triton kernels move 5.3 to 6.9 TB/s on an NVIDIA B300, about the same as the
+op fused inside a compiled model, and 1.4x to 3.3x the `torch.compile` backend's rate.
 
 <picture><source media="(prefers-color-scheme: dark)" srcset="docs/figures/layer_speed_dark.png"><img alt="Training-step time of a patched layer as a share of the plain layer's, per backend, bf16 AMP" src="docs/figures/layer_speed.png"></picture>
 
-A whole training step of one layer, bf16 AMP. A large matmul hides most of the op (102% and 106%
-with the kernels for 768->3072 and 4096->11008). Small, fast layers do not: in eager mode a 3x3 conv takes 180%, and a stack of 72
-small linears 209%, or 134% with the grouped launch, which computes every weight in a few
-launches (`group=True`, the default). With `torch.compile` of the model the step takes 100% to
-124% of the plain one.
+A whole training step of one layer, bf16 AMP. A large matmul hides most of the op: with the
+kernels the step is 2% slower for 768->3072 and 6% slower for 4096->11008. Small, fast layers do
+not hide it. In eager mode a 3x3 conv step is 57% slower, and a stack of 72 small linears 83%
+slower, or 34% with the grouped launch, which computes every weight of the model in one launch
+(`group=True`, the default). With `torch.compile` of the model, the step is 0 to 23% slower.
+
+The eager cost is on the host, not the GPU. Each patched layer adds two kernel launches and one
+autograd node whose backward runs in Python: about 0.2 ms per layer per step on this machine.
+This release cut each launch from about 36 µs to 26 µs; the rest is PyTorch's autograd. The
+grouped launch pays the cost once per model, and `torch.compile` removes it.
 
 The kernels are as accurate as plain torch. Row lengths are summed in fp32 for every weight
 dtype, so under fp16 AMP and bf16 AMP the norm is computed in fp32. Worst error against an fp64
