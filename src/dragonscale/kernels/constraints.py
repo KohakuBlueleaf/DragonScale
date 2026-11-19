@@ -2,7 +2,7 @@
 
 from collections.abc import Callable
 
-from dragonscale_kernels.hardware import device_type_of, family_of, sm_of
+from dragonscale.kernels.hardware import device_type_of, family_of, sm_of
 
 
 def requires(

@@ -4,6 +4,7 @@ labelled parameter-only, activation-moving, or dangerous (activation-moving with
 A weakly pinned direction is free under every constraint except anchors: only a fixed-scale addend
 holds it, and once the scaled term outgrows that addend the direction is nearly free."""
 
+import warnings
 from dataclasses import dataclass
 
 import torch
@@ -72,10 +73,13 @@ class FreeScales:
         return bool(residual.norm() <= 1e-7 * max(s.norm().item(), 1.0))
 
     def describe(self) -> str:
-        lines = [
+        lines = []
+        if self.unknown:
+            lines.append(unknown_message(self.unknown))
+        lines.append(
             f"{len(self.directions)} free direction(s), {len(self.dangerous)} dangerous, "
             f"{self.constraints} constraints over {len(self.names)} groups"
-        ]
+        )
         alone = [d for d in self.directions if len(d.coeffs) == 1 and not d.moves_activations]
         lines += [f"  {d.describe()}" for d in self.directions if d not in alone]
         if alone:
@@ -84,12 +88,19 @@ class FreeScales:
         if self.weak:
             lines.append(f"{len(self.weak)} weakly pinned direction(s), held only by anchors:")
             lines += [f"  {d.describe()}" for d in self.weak]
-        if self.unknown:
-            lines.append(f"  ops without a rule (treated as nonlinear): {dict(self.unknown)}")
         if self.notes:
             lines.append("architecture:")
             lines += [f"  {note}" for note in self.notes]
         return "\n".join(lines)
+
+
+def unknown_message(unknown: dict[str, int]) -> str:
+    ops = ", ".join(f"{name} (x{count})" for name, count in sorted(unknown.items()))
+    return (
+        f"WARNING: {len(unknown)} op(s) without a degree rule were treated as fixing the scale "
+        f"of their inputs, which can hide free scales: {ops}. Add a rule with "
+        "ds.analysis.register_degree_rule."
+    )
 
 
 def null_space(a: Tensor) -> Tensor:
@@ -204,5 +215,9 @@ def solve(result: DegreeTrace) -> FreeScales:
 
 
 def free_scales(model: nn.Module, *inputs, **kwargs) -> FreeScales:
-    """Trace `model(*inputs, **kwargs)` once and return its free directions."""
-    return solve(trace_degrees(model, *inputs, **kwargs))
+    """Trace `model(*inputs, **kwargs)` once and return its free directions. Ops without a degree
+    rule are listed in the report and raise a warning."""
+    report = solve(trace_degrees(model, *inputs, **kwargs))
+    if report.unknown:
+        warnings.warn(unknown_message(report.unknown), stacklevel=2)
+    return report

@@ -2,10 +2,10 @@
 
 import triton  # noqa: F401
 
-from dragonscale_kernels import ops
-from dragonscale_kernels.backends.triton import grouped, rows
-from dragonscale_kernels.constraints import requires
-from dragonscale_kernels.registry import register
+from dragonscale.kernels import ops
+from dragonscale.kernels.backends.triton import grouped, rows
+from dragonscale.kernels.constraints import requires
+from dragonscale.kernels.registry import register
 
 CUDA = requires(("cuda",), min_sm=70)
 IMPLS = {

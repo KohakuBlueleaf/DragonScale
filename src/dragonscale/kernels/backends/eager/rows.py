@@ -1,9 +1,9 @@
-"""Eager row ops (contracts in `dragonscale_kernels.ops`): rows reduced in fp32, fp64 kept."""
+"""Eager row ops (contracts in `dragonscale.kernels.ops`): rows reduced in fp32, fp64 kept."""
 
 from torch import Tensor
 
-from dragonscale_kernels.layout import as_rows, reduced, row_dot, wide
-from dragonscale_kernels.ops import FLOOR
+from dragonscale.kernels.layout import as_rows, reduced, row_dot, wide
+from dragonscale.kernels.ops import FLOOR
 
 
 def row_norm(w: Tensor, view: tuple[int, ...], row_dims: tuple[int, ...]) -> Tensor:

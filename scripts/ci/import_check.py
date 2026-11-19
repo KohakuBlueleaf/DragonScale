@@ -1,4 +1,4 @@
-"""Import every module of the three packages, each in its own interpreter: inside one process the
+"""Import every module of the package, each in its own interpreter: inside one process the
 first successful import hides a cycle in everything imported after it. A backend package is
 skipped when its library is not installed; nothing imports it then.
 
@@ -13,10 +13,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src"
-PACKAGES = ("dragonscale", "dragonscale_common", "dragonscale_kernels")
+PACKAGES = ("dragonscale",)
 BACKENDS = {  # backend package: the library it needs
-    "dragonscale_kernels.backends.triton": "triton",
-    "dragonscale_kernels.backends.compile": "triton",
+    "dragonscale.kernels.backends.triton": "triton",
+    "dragonscale.kernels.backends.compile": "triton",
 }
 
 

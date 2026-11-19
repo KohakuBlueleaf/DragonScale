@@ -2,7 +2,8 @@
 every output tensor and the constraints the op puts on a log-scale direction over parameters.
 
 Every parameter is one group (tied ones once); inputs carry degree 0 and mark the tensors that
-depend on data.
+depend on data. Unit-row weights are computed with plain torch ops during the trace
+(`plain_unit_rows`), whatever the kernel backend, so that every op is seen.
 """
 
 from collections import Counter
@@ -14,6 +15,7 @@ from torch.utils._python_dispatch import TorchDispatchMode
 from torch.utils._pytree import tree_leaves
 
 from dragonscale.analysis.rules import ATTENTION, Anchor, Call, nonlinear, rule_of, zero_like
+from dragonscale.functional.rows import plain_unit_rows
 
 ATTENTION_OPS = {f"aten::{name}" for name in ATTENTION}
 
@@ -158,7 +160,7 @@ def trace_degrees(model: nn.Module, *inputs, **kwargs) -> DegreeTrace:
         handles.append(module.register_forward_pre_hook(enter(path)))
         handles.append(module.register_forward_hook(leave))
     try:
-        with torch.enable_grad(), recorder:
+        with torch.enable_grad(), plain_unit_rows(), recorder:
             out = model(*inputs, **kwargs)
     finally:
         for handle in handles:

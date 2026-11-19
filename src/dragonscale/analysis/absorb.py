@@ -4,7 +4,10 @@ function; `absorb_plan` makes a plan's moves and absorbs its `init="absorb"` lay
 The source is a module with a layer type (its rows are rescaled to the radius) or a norm with an
 affine (its weight is divided by its magnitude). Consumers are given, or found by
 `find_consumers`: the modules with a layer type whose first input carries the source's degree,
-taken in call order until the move is a free direction. The move must be free on the given inputs,
+taken in call order until the move is a free direction. When the source's scale is free on its
+own (a layer read only by a normalization), `into=[]` rescales its rows and bias with no consumer;
+that keeps the function only when the normalization treats each channel on its own (the output
+check refuses it otherwise). The move must be free on the given inputs,
 and the output must not change.
 """
 
@@ -17,12 +20,12 @@ from torch import Tensor, nn
 from dragonscale.analysis.report import FreeScales, solve
 from dragonscale.analysis.trace import DegreeTrace, trace_degrees
 from dragonscale.functional.rows import row_norms
+from dragonscale.kernels.layout import as_rows
+from dragonscale.kernels.ops import FLOOR
 from dragonscale.layer_types import layer_type_of
 from dragonscale.plan.layer_plan import Plan
+from dragonscale.problems import raise_problems
 from dragonscale.spec.rows import RowSpec
-from dragonscale_common.problems import raise_problems
-from dragonscale_kernels.layout import as_rows
-from dragonscale_kernels.ops import FLOOR
 
 
 def _source(
@@ -84,7 +87,9 @@ def find_consumers(
     model: nn.Module, source: str, trace: DegreeTrace, report: FreeScales
 ) -> list[str] | None:
     """The consumers of `source` in call order, added until the move is free; None when there is
-    no such set, the source weight is tied, or its rows are not along the output channels."""
+    no such set, the source weight is tied, or its rows are not along the output channels. An empty
+    list when the source's scale (weight and bias together) is free on its own: a layer read only
+    by a normalization."""
     modules = dict(model.named_modules())
     params = {id(p): n for n, p in model.named_parameters()}
     try:
@@ -95,6 +100,8 @@ def find_consumers(
         return None
     channels = weight.numel() if spec is None else spec.rows(weight.shape)
     k = trace.names.index(params[id(weight)])
+    if report.contains(_coeffs(params, weight, bias, [])):
+        return []
     chosen: list[str] = []
     for path, degree in trace.module_inputs.items():
         if path == source or abs(degree[k].item()) < 1e-9:

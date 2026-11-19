@@ -1,4 +1,4 @@
-"""Triton row ops (contracts in `dragonscale_kernels.ops`) over a strided `[rows, cols]` view.
+"""Triton row ops (contracts in `dragonscale.kernels.ops`) over a strided `[rows, cols]` view.
 
 Each program owns `BLOCK_R` whole rows. With `ONE_PASS` a row fits in one `BLOCK_C` tile and is
 read once; otherwise the columns are walked in `BLOCK_C` chunks, one pass for the reductions and one
@@ -12,8 +12,8 @@ import triton
 import triton.language as tl
 from torch import Tensor
 
-from dragonscale_kernels.backends.triton.common import as_2d, from_2d, rows_cols, tiles
-from dragonscale_kernels.ops import FLOOR
+from dragonscale.kernels.backends.triton.common import as_2d, from_2d, rows_cols, tiles
+from dragonscale.kernels.ops import FLOOR
 
 
 def _acc_dtype(t: Tensor) -> torch.dtype:

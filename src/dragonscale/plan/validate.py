@@ -5,7 +5,7 @@ from torch import nn
 from torch.nn.utils import parametrize
 
 from dragonscale.functional.rows import row_norms
-from dragonscale.layer_types import LAYER_TYPES
+from dragonscale.layer_types import LAYER_TYPES, read_by_parent
 from dragonscale.nn.layers import UnitRows
 from dragonscale.plan.layer_plan import TIED_OPTIONS, LayerPlan, Plan
 
@@ -100,6 +100,7 @@ def validate(model: nn.Module, plan: Plan) -> list[str]:
     """Every error of `plan` on `model`; empty when it can be applied."""
     modules = dict(model.named_modules())
     errors = _tie_errors(model, plan)
+    by_parent = read_by_parent(model)
     if plan.moves:
         errors.append(
             f"{len(plan.moves)} scale move(s) not made: "
@@ -116,4 +117,9 @@ def validate(model: nn.Module, plan: Plan) -> list[str]:
             errors.append(f"{where}: no such module")
             continue
         errors += _layer_errors(layer, module)
+        if layer.install == "forward" and layer.path in by_parent:
+            errors.append(
+                f"{where}: its parent module reads its weight directly, so a replaced forward "
+                "would not apply; use install 'parametrize'"
+            )
     return errors

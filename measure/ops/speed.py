@@ -20,9 +20,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import torch
 from common import append_row, run_dir, table
 
+from dragonscale.kernels import available, ops, resolve
+from dragonscale.kernels.registry import load_backends
 from dragonscale.spec import defaults
-from dragonscale_kernels import available, ops, resolve
-from dragonscale_kernels.registry import load_backends
 
 DEVICE = "cuda:0"
 DTYPE = "fp32"  # "fp32" | "bf16" | "fp16"

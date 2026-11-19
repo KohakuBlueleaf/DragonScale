@@ -12,7 +12,7 @@ from torch import Tensor
 
 from dragonscale.functional.rows import fill_zero_rows_, preserving_gain
 from dragonscale.patch.patched import GAIN, PatchedLayer
-from dragonscale_common.problems import raise_problems
+from dragonscale.problems import raise_problems
 
 FORMATS = ("raw", "baked", "native")
 

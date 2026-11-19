@@ -12,16 +12,18 @@
 from torch import nn
 
 from dragonscale.plan.rules import Rule
-from dragonscale_common.registry import Registry
 
-PRESETS = Registry("preset")
-PRESETS.add("unit_gain", (Rule(".*"),))
-PRESETS.add("unit", (Rule(".*", mode="unit", init="ones"),))
-PRESETS.add("linear_unit_gain", (Rule(nn.Linear),))
-PRESETS.add("conv_unit_gain", (Rule((nn.Conv1d, nn.Conv2d, nn.Conv3d)),))
-PRESETS.add("parametrize_unit_gain", (Rule(".*", install="parametrize"),))
+PRESETS: dict[str, tuple[Rule, ...]] = {
+    "unit_gain": (Rule(".*"),),
+    "unit": (Rule(".*", mode="unit", init="ones"),),
+    "linear_unit_gain": (Rule(nn.Linear),),
+    "conv_unit_gain": (Rule((nn.Conv1d, nn.Conv2d, nn.Conv3d)),),
+    "parametrize_unit_gain": (Rule(".*", install="parametrize"),),
+}
 
 
 def preset(name: str) -> list[Rule]:
     """The rules of a named preset."""
-    return list(PRESETS.get(name))
+    if name not in PRESETS:
+        raise KeyError(f"unknown preset {name!r}; presets: {', '.join(PRESETS)}")
+    return list(PRESETS[name])

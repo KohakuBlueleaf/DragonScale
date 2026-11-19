@@ -11,13 +11,14 @@ from dragonscale.functional.rows import (
     UnitRowOp,
     compiled_unit_rows,
     fill_zero_rows_,
+    plain_active,
     preserving_gain,
     unit_row_op,
     zero_rows_,
 )
 from dragonscale.layer_types import LAYER_TYPES, LayerType
 from dragonscale.nn.layers import WEIGHT_FNS
-from dragonscale.patch import grouped
+from dragonscale.patch import grouped, probe
 from dragonscale.patch.forwards import eval_forward, train_forward
 from dragonscale.plan.layer_plan import LayerPlan
 from dragonscale.plan.validate import MARKER
@@ -26,8 +27,8 @@ GAIN = "gain"
 
 
 class UnitRowWeight(nn.Module):
-    """The parametrization of the `parametrize` install: `weight` reads as its unit-row version,
-    cached in eval mode under no grad."""
+    """The parametrization of the `parametrize` install: `weight` reads as its unit-row version
+    (in eval mode under no grad, the cached one inside `Session.cache_weights`)."""
 
     def __init__(self, patched: "PatchedLayer", gain: nn.Parameter | None, training: bool):
         super().__init__()
@@ -102,6 +103,7 @@ class PatchedLayer:
         self._gain: nn.Parameter | None = None
         self._filled: tuple[Tensor, int] | None = None
         self._cache: tuple[tuple, Tensor] | None = None
+        self.caching = False  # set by Session.cache_weights
         self.stash: tuple | None = None  # set by dragonscale.patch.grouped for one forward
 
     def __reduce__(self):
@@ -155,38 +157,47 @@ class PatchedLayer:
 
     def weight(self, raw: Tensor, gain: Tensor | None) -> Tensor:
         """The weight the layer computes with, from a raw weight and a gain."""
-        if not torch.compiler.is_compiling():
-            stash = self.stash
-            if (
-                stash is not None
-                and stash[0] is raw
-                and stash[1] == raw._version
-                and stash[2] is gain
-                and (gain is None or stash[3] == gain._version)
-                and grouped.plain_autograd()
-            ):
-                return stash[4]
+        if not torch.compiler.is_compiling() and probe.probing():
+            with probe.inside_unit_rows():
+                return self._weight(raw, gain)
+        return self._weight(raw, gain)
+
+    def _weight(self, raw: Tensor, gain: Tensor | None) -> Tensor:
         if torch.compiler.is_compiling():
-            spec, shape = self.plan.spec, raw.shape
-            if gain is not None and gain.numel() != spec.rows(shape):
-                gain = gain.reshape(1).expand(spec.rows(shape))
-            return compiled_unit_rows(
-                raw,
-                spec.view_of(shape),
-                tuple(spec.row_dims),
-                spec.radius_of(shape),
-                gain,
-                self.backend,
-            )
+            return self._compiled(raw, gain, self.backend)
+        if plain_active():
+            return self._compiled(raw, gain, None)
+        stash = self.stash
+        if (
+            stash is not None
+            and stash[0] is raw
+            and stash[1] == raw._version
+            and stash[2] is gain
+            and (gain is None or stash[3] == gain._version)
+            and grouped.plain_autograd()
+        ):
+            return stash[4]
         return self.unit_row_op(raw)(raw, gain)
+
+    def _compiled(self, raw: Tensor, gain: Tensor | None, backend: str | None) -> Tensor:
+        spec, shape = self.plan.spec, raw.shape
+        if gain is not None and gain.numel() != spec.rows(shape):
+            gain = gain.reshape(1).expand(spec.rows(shape))
+        return compiled_unit_rows(
+            raw, spec.view_of(shape), tuple(spec.row_dims), spec.radius_of(shape), gain, backend
+        )
 
     def unit_weight(self) -> Tensor:
         return self.weight(self.raw_weight(), self.gain)
 
     def cached_weight(self, raw: Tensor, gain: Tensor | None) -> Tensor:
-        """The weight without autograd, kept until the raw weight or the gain changes."""
+        """The weight without autograd. Inside `Session.cache_weights` it is kept until the raw
+        weight or the gain changes through an op that bumps its version counter."""
         if self.tied_to is not None:
             return self.tied_to.cached_weight(raw, gain)
+        if not self.caching or plain_active():
+            with torch.no_grad():
+                return self.weight(raw, gain)
         key = (raw.data_ptr(), raw._version, raw.device, raw.dtype)
         if gain is not None:
             key += (gain.data_ptr(), gain._version)
@@ -194,6 +205,10 @@ class PatchedLayer:
             with torch.no_grad():
                 self._cache = (key, self.weight(raw, gain).detach())
         return self._cache[1]
+
+    def invalidate(self) -> None:
+        """Drop the cached weight."""
+        self._cache = None
 
     def eval_weight(self, raw: Tensor, gain: Tensor | None) -> Tensor:
         """Eval mode: the cached weight when no gradient is recorded."""

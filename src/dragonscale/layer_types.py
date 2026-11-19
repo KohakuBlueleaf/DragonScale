@@ -1,5 +1,6 @@
-"""`LayerType`: what the patcher does differently per module class, one record per class; and the
-records of the stock torch layers and of transformers' `Conv1D`.
+"""`LayerType`: what the patcher does differently per module class, one record per class; the
+records of the stock torch layers, `nn.MultiheadAttention`'s input projection and transformers'
+`Conv1D`; and the child layers whose weight a parent module reads itself (`READ_BY_PARENT`).
 
 A class is given by itself or by its `module.QualName` string, for a package that is not imported.
 """
@@ -38,6 +39,7 @@ class LayerType:
 
 LAYER_TYPES: dict[str, LayerType] = {}
 BY_CLASS: dict[type | str, LayerType] = {}
+READ_BY_PARENT: dict[type, tuple[str, ...]] = {}
 
 
 def qualified(cls: type) -> str:
@@ -49,6 +51,22 @@ def register_layer_type(layer_type: LayerType) -> LayerType:
     LAYER_TYPES[layer_type.name] = layer_type
     BY_CLASS[layer_type.module] = layer_type
     return layer_type
+
+
+def register_read_by_parent(parent: type, *children: str) -> None:
+    """Declare that `parent`'s forward reads the weight of each child (by attribute name) itself,
+    so a patch must go through `install="parametrize"` there."""
+    READ_BY_PARENT[parent] = tuple(dict.fromkeys((*READ_BY_PARENT.get(parent, ()), *children)))
+
+
+def read_by_parent(model: nn.Module) -> set[str]:
+    """Paths of the modules of `model` whose weight a parent module reads itself."""
+    found = set()
+    for path, module in model.named_modules():
+        for parent, children in READ_BY_PARENT.items():
+            if isinstance(module, parent):
+                found.update(f"{path}.{child}" if path else child for child in children)
+    return found
 
 
 def layer_type_of(module: nn.Module) -> LayerType | None:
@@ -118,6 +136,20 @@ register_layer_type(
         unit_class=unit.UnitRowEmbedding,
     )
 )
+# `in_proj_weight` stacks the q, k and v projections, `[3 * dim, dim]`: its rows are theirs
+register_layer_type(
+    LayerType(
+        "multihead_attention",
+        nn.MultiheadAttention,
+        "in_proj_weight",
+        _rows,
+        None,
+        bias="in_proj_bias",
+    )
+)
+register_read_by_parent(nn.MultiheadAttention, "out_proj")
+# The fast path of the encoder layer in eval mode reads the MLP weights directly
+register_read_by_parent(nn.TransformerEncoderLayer, "linear1", "linear2")
 register_layer_type(
     LayerType(
         "hf_conv1d",

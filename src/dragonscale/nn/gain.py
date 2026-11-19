@@ -3,7 +3,7 @@
 import torch
 from torch import Tensor, nn
 
-from dragonscale_kernels.layout import channel_shape
+from dragonscale.kernels.layout import channel_shape
 
 
 class Gain(nn.Module):

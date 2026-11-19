@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from dragonscale_kernels.registry import load_backends
+from dragonscale.kernels.registry import load_backends
 
 
 def pytest_configure(config):

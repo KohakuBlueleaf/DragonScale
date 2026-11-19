@@ -11,8 +11,9 @@ outside `torch.compile`. A layer the forward does not use gets no gradient.
 import torch
 from torch import Tensor, nn
 
+from dragonscale.functional.rows import plain_active
+from dragonscale.kernels import available, ops, resolve
 from dragonscale.plan.validate import MARKER
-from dragonscale_kernels import available, ops, resolve
 
 STASH = "_ds_grouped"
 GROUPED_DTYPES = (torch.float32, torch.bfloat16, torch.float16)
@@ -100,7 +101,7 @@ def _layers(model: nn.Module) -> list:
 
 def prepare(model: nn.Module, args) -> None:
     """Forward pre-hook: compute every eligible layer's weight in one node and stash it."""
-    if torch.compiler.is_compiling() or not plain_autograd():
+    if torch.compiler.is_compiling() or not plain_autograd() or plain_active():
         return
     group = []
     for patched in _layers(model):

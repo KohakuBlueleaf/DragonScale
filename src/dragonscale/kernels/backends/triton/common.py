@@ -5,7 +5,7 @@ import math
 import triton
 from torch import Tensor
 
-from dragonscale_kernels.layout import reduced
+from dragonscale.kernels.layout import reduced
 
 TILE = 4096
 MAX_COLS = 2048

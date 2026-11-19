@@ -1,8 +1,8 @@
 """Eager backend: every op in plain torch."""
 
-from dragonscale_kernels import ops
-from dragonscale_kernels.backends.eager import rows
-from dragonscale_kernels.registry import register
+from dragonscale.kernels import ops
+from dragonscale.kernels.backends.eager import rows
+from dragonscale.kernels.registry import register
 
 IMPLS = {
     ops.ROW_NORM: rows.row_norm,

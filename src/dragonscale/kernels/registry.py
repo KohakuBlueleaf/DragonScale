@@ -9,9 +9,9 @@ from dataclasses import dataclass, field
 
 import torch
 
-from dragonscale_common.log import get_logger
-from dragonscale_kernels.errors import NoImplementationError
-from dragonscale_kernels.hardware import arch_of
+from dragonscale.kernels.errors import NoImplementationError
+from dragonscale.kernels.hardware import arch_of
+from dragonscale.log import get_logger
 
 BACKENDS = ("triton", "compile", "eager")
 log = get_logger("kernels")
@@ -53,7 +53,7 @@ def load_backends() -> None:
     STATE.loaded = True
     for name in BACKENDS:
         try:
-            importlib.import_module(f"dragonscale_kernels.backends.{name}")
+            importlib.import_module(f"dragonscale.kernels.backends.{name}")
         except ImportError as err:
             STATE.unavailable[name] = str(err)
 

@@ -18,9 +18,9 @@ from dataclasses import dataclass
 import torch
 from torch import Tensor
 
+from dragonscale.kernels import ops, resolve
+from dragonscale.kernels.layout import as_rows, reduced, wide
 from dragonscale.spec.rows import RowSpec
-from dragonscale_kernels import ops, resolve
-from dragonscale_kernels.layout import as_rows, reduced, wide
 
 _PLAIN = threading.local()
 

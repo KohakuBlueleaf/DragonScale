@@ -121,6 +121,53 @@ def convolution(call: Call):
     return out, [] if bias is None else [call.deg(bias) - out]
 
 
+def add_product(call: Call):
+    """`addcmul(self, a, b)` / `addcdiv(self, a, b)`: `self + value * a * b` (or `a / b`); the
+    product's degree, which `self` must match (an anchor when one side has a fixed scale)."""
+    a, b = call.deg(call.arg(1)), call.deg(call.arg(2))
+    term = a - b if call.name.startswith("aten::addcdiv") else a + b
+    base = call.deg(call.arg(0))
+    if is_zero(base) != is_zero(term):
+        scaled_side = base if is_zero(term) else term
+        return scaled_side, [Anchor(scaled_side)]
+    return base, [base - term]
+
+
+def vector_norm(call: Call):
+    """`linalg_vector_norm` / `norm`: a p-norm has the input's degree; p = 0 counts entries."""
+    order = call.arg(1, "ord" if call.name == "aten::linalg_vector_norm" else "p", 2)
+    if isinstance(order, int | float) and order == 0:
+        return call.zero, []
+    return call.deg(call.arg(0)), []
+
+
+def moments(call: Call):
+    """`var_mean` / `std_mean`: (2 or 1 times the input's degree, the input's degree)."""
+    d = call.deg(call.arg(0))
+    return [(2.0 if call.name == "aten::var_mean" else 1.0) * d, d], []
+
+
+def write_into(call: Call):
+    """`index_put`, `scatter`, `index_add`: the written values must match the target."""
+    target = call.arg(0)
+    source = call.arg(2, "values") if call.name.startswith("aten::index_put") else call.arg(3)
+    if not isinstance(source, Tensor):
+        return call.deg(target), []
+    dt, ds = call.deg(target), call.deg(source)
+    if is_zero(dt) != is_zero(ds):
+        scaled_side = ds if is_zero(dt) else dt
+        return scaled_side, [Anchor(scaled_side)]
+    return dt, [dt - ds]
+
+
+def library_unit_rows(call: Call):
+    """`dragonscale::unit_rows(w, gain, ...)`: the output carries the gain's degree (none
+    without a gain), the norms the raw weight's."""
+    gain = call.arg(1)
+    out = call.deg(gain) if isinstance(gain, Tensor) else call.zero
+    return [out, call.deg(call.arg(0))], []
+
+
 def divide(call: Call):
     return call.deg(call.arg(0)) - call.deg(call.arg(1, "other")), []
 
@@ -207,21 +254,28 @@ PASS = (
     "native_dropout", "dropout", "sum", "mean", "amax", "amin", "max", "min", "clamp", "clamp_min",
     "clamp_max", "masked_fill", "index", "tril", "triu", "diagonal", "as_strided", "cumsum",
     "expand_as", "view_as", "squeeze_", "unsqueeze_", "transpose_", "sort", "topk",
+    "repeat_interleave", "lift_fresh_copy", "_unsafe_index", "take_along_dim", "movedim",
+    "isfinite", "isnan", "isinf", "argmax", "argmin", "any", "all", "nan_to_num",
 )  # fmt: skip
 NONLINEAR = (
     "silu", "gelu", "tanh", "sigmoid", "exp", "log", "log1p", "expm1", "sin", "cos", "erf",
     "softplus", "elu", "mish", "hardswish", "hardsigmoid", "hardtanh", "logsigmoid", "_softmax",
     "softmax", "_log_softmax", "log_softmax", "sign", "atan", "atan2", "erfinv", "selu", "celu",
+    "logsumexp", "gelu_tanh", "prelu", "_prelu_kernel", "glu", "relu6", "rrelu_with_noise",
 )  # fmt: skip
 CONSTANT = (
     "zeros", "ones", "full", "empty", "arange", "zeros_like", "ones_like", "full_like",
     "empty_like", "randn", "rand", "randn_like", "rand_like", "scalar_tensor", "fill_", "zero_",
     "bernoulli_", "new_zeros", "new_ones", "new_empty", "new_full", "eye", "linspace",
+    "empty_strided", "new_empty_strided", "randint", "randint_like", "randperm", "bernoulli",
+    "_local_scalar_dense", "full_like", "logspace", "normal_", "uniform_",
 )  # fmt: skip
 ATTENTION = (
     "_scaled_dot_product_flash_attention", "_scaled_dot_product_flash_attention_for_cpu",
     "_scaled_dot_product_efficient_attention", "_scaled_dot_product_cudnn_attention",
-    "_scaled_dot_product_attention_math",
+    "_scaled_dot_product_attention_math", "_scaled_dot_product_fused_attention_overrideable",
+    "_scaled_dot_product_attention_math_for_mps", "scaled_dot_product_attention",
+    "_efficient_attention_forward", "_flash_attention_forward",
 )  # fmt: skip
 
 for _name in PASS:
@@ -237,9 +291,22 @@ register_degree_rule(
     product,
 )
 register_degree_rule(
-    tuple(f"aten::{n}" for n in ("add", "add_", "sub", "sub_", "rsub", "lerp", "lerp_")),
+    tuple(
+        f"aten::{n}"
+        for n in (
+            "add", "sub", "rsub", "lerp", "maximum", "minimum", "fmax", "fmin",
+            "eq", "ne", "lt", "le", "gt", "ge",
+        )
+    ),
     additive,
+)  # fmt: skip
+register_degree_rule(("aten::addcmul", "aten::addcdiv"), add_product)
+register_degree_rule(("aten::linalg_vector_norm", "aten::norm"), vector_norm)
+register_degree_rule(("aten::var_mean", "aten::std_mean"), moments)
+register_degree_rule(
+    ("aten::index_put", "aten::scatter", "aten::scatter_add", "aten::index_add"), write_into
 )
+register_degree_rule("dragonscale::unit_rows", library_unit_rows)
 register_degree_rule(("aten::addmm", "aten::addmv", "aten::baddbmm", "aten::addbmm"), matmul_add)
 register_degree_rule("aten::linear", linear)
 register_degree_rule(
@@ -274,7 +341,12 @@ register_degree_rule("aten::promote_types", constant)
 
 
 def rule_of(name: str) -> DegreeRule | None:
-    return RULES.get(name)
+    """The rule of an op; an in-place op (`relu_`, `add_`) without its own rule takes the rule of
+    its out-of-place twin."""
+    rule = RULES.get(name)
+    if rule is None and name.endswith("_"):
+        rule = RULES.get(name[:-1])
+    return rule
 
 
 def zero_like(k: int) -> Tensor:

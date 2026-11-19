@@ -13,11 +13,11 @@ import torch
 from common import append_row, run_dir, table
 
 from dragonscale.functional.rows import reference
+from dragonscale.kernels import available, ops, resolve
+from dragonscale.kernels.error_stats import compare
+from dragonscale.kernels.layout import as_rows, reduced
+from dragonscale.kernels.registry import load_backends
 from dragonscale.spec import defaults
-from dragonscale_kernels import available, ops, resolve
-from dragonscale_kernels.error_stats import compare
-from dragonscale_kernels.layout import as_rows, reduced
-from dragonscale_kernels.registry import load_backends
 
 SHAPES = {
     "linear 4096x1024 rows": ((4096, 1024), defaults.rows()),

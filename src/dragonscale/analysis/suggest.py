@@ -18,13 +18,13 @@ from dataclasses import replace
 from torch import nn
 
 from dragonscale.analysis.absorb import find_consumers
-from dragonscale.analysis.report import FreeScales, solve
+from dragonscale.analysis.report import FreeScales, solve, unknown_message
 from dragonscale.analysis.trace import trace_degrees
 from dragonscale.layer_types import layer_type_of
 from dragonscale.plan.build import make_plan
 from dragonscale.plan.layer_plan import Plan
 from dragonscale.plan.rules import Rule
-from dragonscale_common.problems import raise_problems
+from dragonscale.problems import raise_problems
 
 LEVELS = ("report", "minimal", "matrices", "absorb")
 
@@ -72,7 +72,7 @@ def _absorbed(model: nn.Module, inputs, kwargs) -> Plan:
         if not _norm_affine(module) and layer_type_of(module) is None:
             continue
         into = find_consumers(model, path, trace, report)
-        if into is None:
+        if not into:  # none, or the scale is free on its own: no move keeps the function
             continue
         moves.append((path, tuple(into)))
         if layer_type_of(module) is not None:
@@ -93,9 +93,15 @@ def suggest(
     *inputs,
     level: str = "matrices",
     report: FreeScales | None = None,
+    allow_unknown: bool = False,
     **kwargs,
 ) -> Plan:
-    """The plan of `level` for `model` on `inputs`; `report` is reused by `minimal`."""
+    """The plan of `level` for `model` on `inputs`; `report` is reused by `minimal`. Raises when
+    the trace meets an op without a degree rule, unless `allow_unknown`."""
+    if level in ("minimal", "absorb") and not allow_unknown:
+        report = report or solve(trace_degrees(model, *inputs, **kwargs))
+        if report.unknown:
+            raise ValueError(unknown_message(report.unknown) + " Or pass allow_unknown=True.")
     match level:
         case "report":
             return Plan()

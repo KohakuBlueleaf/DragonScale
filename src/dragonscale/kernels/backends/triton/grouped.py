@@ -11,8 +11,8 @@ import triton
 import triton.language as tl
 from torch import Tensor
 
-from dragonscale_kernels.backends.triton.common import ONE_PASS_BYTES, TILE
-from dragonscale_kernels.ops import FLOOR
+from dragonscale.kernels.backends.triton.common import ONE_PASS_BYTES, TILE
+from dragonscale.kernels.ops import FLOOR
 
 FWD_FIELDS = 8  # w, out, gain (0: none), norms, rows, cols, first program, unused
 BWD_FIELDS = (

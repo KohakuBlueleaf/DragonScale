@@ -50,4 +50,4 @@ select = ["E", "F", "W", "I", "B"]
 ignore = ["E501"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["dragonscale", "dragonscale_common", "dragonscale_kernels"]
+known-first-party = ["dragonscale"]

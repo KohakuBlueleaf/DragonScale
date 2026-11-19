@@ -8,9 +8,9 @@ import pytest
 import torch
 
 from dragonscale.functional.rows import compiled_unit_rows, reference, unit_rows
+from dragonscale.kernels import ops
+from dragonscale.kernels.layout import as_rows, reduced, wide
 from dragonscale.spec.rows import RowSpec
-from dragonscale_kernels import ops
-from dragonscale_kernels.layout import as_rows, reduced, wide
 
 
 def _old_compiled(w, view, row_dims, radius, gain):

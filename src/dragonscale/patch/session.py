@@ -1,21 +1,22 @@
 """`Session`: every change one plan made to one model, and the only way to undo or bake it."""
 
 import weakref
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 
 from torch import Tensor, nn
 
 from dragonscale.layer_types import LAYER_TYPES
-from dragonscale.patch import grouped
+from dragonscale.log import get_logger
+from dragonscale.patch import grouped, probe
 from dragonscale.patch import state as formats
 from dragonscale.patch.patched import PatchedLayer
 from dragonscale.plan.build import make_plan
 from dragonscale.plan.layer_plan import Plan
 from dragonscale.plan.rules import Rule
 from dragonscale.plan.validate import MARKER, validate
+from dragonscale.problems import raise_problems
 from dragonscale.spec.rows import RowSpec
-from dragonscale_common.log import get_logger
-from dragonscale_common.problems import raise_problems
 
 log = get_logger("patch")
 
@@ -62,6 +63,7 @@ class Session:
             self.patched.append(patched)
         if group:
             grouped.attach(model)
+        probe.attach(model)
 
     @classmethod
     def from_model(cls, model: nn.Module) -> "Session":
@@ -105,6 +107,27 @@ class Session:
         for p in self.patched:
             p.set_backend(backend)
 
+    @contextmanager
+    def cache_weights(self) -> Iterator[None]:
+        """Inside this block, a forward in eval mode without gradients reuses each layer's
+        unit-row weight until its raw weight or gain changes. A change is seen through the
+        tensor's version counter, which writes through `.data` do not bump: after such a write,
+        call `invalidate()`."""
+        layers = list(self.patched)
+        for p in layers:
+            p.caching = True
+        try:
+            yield
+        finally:
+            for p in layers:
+                p.caching = False
+                p.invalidate()
+
+    def invalidate(self) -> None:
+        """Drop every cached unit-row weight (see `cache_weights`)."""
+        for p in self.patched:
+            p.invalidate()
+
     def state_dict(self, format: str = "raw") -> dict[str, Tensor]:
         """The model's state in `format` (`raw`, `baked` or `native`)."""
         self._check_open()
@@ -143,6 +166,7 @@ class Session:
         for p, weight in weights:
             getattr(p.module, p.layer_type.weight).data.copy_(weight)
         grouped.detach(self.model)
+        probe.detach(self.model)
         self.closed = True
 
     def canonicalize(self) -> None:
@@ -153,6 +177,7 @@ class Session:
         for p in reversed(self.patched):
             p.canonicalize()
         grouped.detach(self.model)
+        probe.detach(self.model)
         self.closed = True
 
     def remove(self) -> None:
@@ -161,6 +186,7 @@ class Session:
         for p in reversed(self.patched):
             p.uninstall()
         grouped.detach(self.model)
+        probe.detach(self.model)
         self.closed = True
 
     def describe(self) -> str:

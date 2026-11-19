@@ -4,9 +4,9 @@ import importlib.util
 
 import torch
 
-from dragonscale_kernels.backends.eager import IMPLS
-from dragonscale_kernels.constraints import requires
-from dragonscale_kernels.registry import register
+from dragonscale.kernels.backends.eager import IMPLS
+from dragonscale.kernels.constraints import requires
+from dragonscale.kernels.registry import register
 
 if importlib.util.find_spec("triton") is None:
     raise ImportError("torch.compile on CUDA needs triton")

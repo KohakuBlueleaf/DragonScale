@@ -4,7 +4,7 @@ import torch
 from torch import nn
 
 import dragonscale as ds
-from dragonscale_kernels import available, ops
+from dragonscale.kernels import available, ops
 
 
 def main() -> None:

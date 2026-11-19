@@ -419,7 +419,7 @@ kogine run measure/plots.py
 | path | contents |
 | --- | --- |
 | `src/dragonscale/` | the library: analysis, plans, patching, the grouped launch, the gradient decorator, unit-row modules |
-| `src/dragonscale_kernels/` | the row ops per backend: eager reference, `torch.compile`, Triton |
+| `src/dragonscale.kernels/` | the row ops per backend: eager reference, `torch.compile`, Triton |
 | `src/dragonscale_common/` | helpers shared by both, without torch: logger, name registry, dotted-path import, problem lists |
 | `measure/` | experiments, op benchmarks and figures, one folder each, run with kogine |
 | `tests/` | patch / remove / bake / canonicalize, the grouped launch, and the analysis on hand-checked models |

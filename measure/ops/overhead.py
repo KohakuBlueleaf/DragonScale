@@ -17,8 +17,8 @@ from common import append_row, run_dir, table
 from torch import nn
 
 import dragonscale as ds
-from dragonscale_kernels import available, ops
-from dragonscale_kernels.registry import load_backends
+from dragonscale.kernels import available, ops
+from dragonscale.kernels.registry import load_backends
 
 ROUNDS = 30
 BLOCK = 10  # steps queued per timed block, as a training loop queues them
