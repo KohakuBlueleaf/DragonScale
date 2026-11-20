@@ -4,8 +4,11 @@ and which combinations an op needs fixed (constraints).
 A rule is `rule(call) -> (outputs, constraints)`: `call.deg(t)` is the degree vector of a tensor
 argument (zero for a scalar or a constant), `outputs` one degree per tensor output (a single value
 applies to all), `constraints` the vectors whose dot with the direction must be 0. A constraint
-wrapped in `Anchor` comes from adding a fixed-scale term (degree 0) to a scaled one: it holds the
-scaled side only as long as the fixed term is not negligible next to it.
+wrapped in `Anchor` comes from combining a fixed-scale term with a scaled one (a sum, a bias, a
+concatenation): it holds the scaled side only as long as the fixed term is not negligible next to
+it. A term has a fixed scale when its degree is identically 0, whatever produced it: a norm output
+without affine, a unit-row layer applied to a fixed-scale tensor, a constant, a buffer, a frozen
+parameter, the model input. The same rule applies to every source.
 """
 
 from collections.abc import Callable
@@ -15,6 +18,8 @@ import torch
 from torch import Tensor
 
 EPS_SCALAR = 1e-3
+PRODUCT = "the input times the weight"
+NORMALIZED = "the normalized input"
 
 
 @dataclass
@@ -52,9 +57,12 @@ class Call:
 
 @dataclass(frozen=True)
 class Anchor:
-    """A constraint set by a fixed-scale addend."""
+    """A constraint set by a fixed-scale term; `fixed` is that term: a tensor, a number, or a
+    description. `bias` marks a bias added to a fixed-scale product (or normalized input)."""
 
     vector: Tensor
+    fixed: object = None
+    bias: bool = False
 
 
 DegreeRule = Callable[[Call], tuple]
@@ -91,6 +99,15 @@ def is_zero(vector: Tensor) -> bool:
     return bool(vector.abs().max() <= 1e-12)
 
 
+def match(da: Tensor, db: Tensor, a: object = None, b: object = None) -> list:
+    """The constraint that two combined terms `a` and `b` (degrees `da`, `db`) move together: an
+    `Anchor` on the scaled one when the other has a fixed scale (degree identically 0), an
+    equality otherwise."""
+    if is_zero(da) != is_zero(db):
+        return [Anchor(db, a) if is_zero(da) else Anchor(da, b)]
+    return [da - db]
+
+
 def additive(call: Call):
     """Both sides must move together. A fixed-scale side (degree 0, or a scalar that is not an
     epsilon) anchors the other: the output carries the scaled side's degree and the constraint is
@@ -100,32 +117,39 @@ def additive(call: Call):
         return call.deg(b if call.exact_zero(a) else a), []
     if isinstance(a, Tensor) and isinstance(b, Tensor):
         da, db = call.deg(a), call.deg(b)
-        if is_zero(da) != is_zero(db):
-            scaled_side = db if is_zero(da) else da
-            return scaled_side, [Anchor(scaled_side)]
-        return da, [da - db]
+        return (db if is_zero(da) else da), match(da, db, a, b)
     tensor, scalar = (a, b) if isinstance(a, Tensor) else (b, a)
     small = isinstance(scalar, int | float) and abs(scalar) <= EPS_SCALAR
-    return call.deg(tensor), [] if small else [Anchor(call.deg(tensor))]
+    return call.deg(tensor), [] if small else [Anchor(call.deg(tensor), scalar)]
+
+
+def with_bias(call: Call, out: Tensor, bias, term: str = PRODUCT) -> tuple:
+    """A product (or a normalized input) of degree `out` plus `bias`: they must match, and the
+    sum carries the scaled side's degree (`match`)."""
+    if not isinstance(bias, Tensor):
+        return out, []
+    db = call.deg(bias)
+    found = [
+        Anchor(c.vector, c.fixed, bias=True) if isinstance(c, Anchor) else c
+        for c in match(db, out, bias, term)
+    ]
+    return (db if is_zero(out) else out), found
 
 
 def matmul_add(call: Call):
     """`addmm(bias, a, b)` and its relatives: the product's degree, the bias must match it."""
     bias, a, b = call.args[0], call.args[1], call.args[2]
-    out = call.deg(a) + call.deg(b)
-    return out, [call.deg(bias) - out]
+    return with_bias(call, call.deg(a) + call.deg(b), bias)
 
 
 def linear(call: Call):
     x, w, bias = call.arg(0), call.arg(1), call.arg(2, "bias")
-    out = call.deg(x) + call.deg(w)
-    return out, [] if bias is None else [call.deg(bias) - out]
+    return with_bias(call, call.deg(x) + call.deg(w), bias)
 
 
 def convolution(call: Call):
     x, w, bias = call.args[0], call.args[1], call.arg(2, "bias")
-    out = call.deg(x) + call.deg(w)
-    return out, [] if bias is None else [call.deg(bias) - out]
+    return with_bias(call, call.deg(x) + call.deg(w), bias)
 
 
 def add_product(call: Call):
@@ -134,10 +158,7 @@ def add_product(call: Call):
     a, b = call.deg(call.arg(1)), call.deg(call.arg(2))
     term = a - b if call.name.startswith("aten::addcdiv") else a + b
     base = call.deg(call.arg(0))
-    if is_zero(base) != is_zero(term):
-        scaled_side = base if is_zero(term) else term
-        return scaled_side, [Anchor(scaled_side)]
-    return base, [base - term]
+    return (term if is_zero(base) else base), match(base, term, call.arg(0), "the product")
 
 
 def vector_norm(call: Call):
@@ -161,10 +182,7 @@ def write_into(call: Call):
     if not isinstance(source, Tensor):
         return call.deg(target), []
     dt, ds = call.deg(target), call.deg(source)
-    if is_zero(dt) != is_zero(ds):
-        scaled_side = ds if is_zero(dt) else dt
-        return scaled_side, [Anchor(scaled_side)]
-    return dt, [dt - ds]
+    return (ds if is_zero(dt) else dt), match(dt, ds, target, source)
 
 
 def library_unit_rows(call: Call):
@@ -194,12 +212,19 @@ def scaled(factor: float) -> DegreeRule:
 
 
 def concatenate(call: Call):
-    """Every piece must move together (cat, stack); an exactly-zero piece fits any scale."""
+    """Every piece must move together (cat, stack); an exactly-zero piece fits any scale, and a
+    fixed-scale piece anchors the scaled ones."""
     pieces = [t for t in call.args[0] if isinstance(t, Tensor) and not call.exact_zero(t)]
-    if not pieces:
+    degrees = [call.deg(t) for t in pieces]
+    scaled = [d for d in degrees if not is_zero(d)]
+    if not scaled:
         return call.zero, []
-    first = call.deg(pieces[0])
-    return first, [call.deg(t) - first for t in pieces[1:]]
+    first = scaled[0]
+    constraints = [d - first for d in scaled[1:]]
+    fixed = [t for t, d in zip(pieces, degrees, strict=True) if is_zero(d)]
+    if fixed:
+        constraints.append(Anchor(first, fixed[0]))
+    return first, constraints
 
 
 def select_where(call: Call):
@@ -207,7 +232,8 @@ def select_where(call: Call):
     if call.exact_zero(a) or call.exact_zero(b):
         return call.deg(b if call.exact_zero(a) else a), []
     if isinstance(a, Tensor) and isinstance(b, Tensor):
-        return call.deg(a), [call.deg(a) - call.deg(b)]
+        da, db = call.deg(a), call.deg(b)
+        return (db if is_zero(da) else da), match(da, db, a, b)
     tensor = a if isinstance(a, Tensor) else b
     return call.deg(tensor), []
 
@@ -224,12 +250,13 @@ def normalized(
     call: Call, weight_index: int, bias_index: int | None, stats: tuple[int, ...]
 ) -> tuple:
     """A scale-invariant norm: output degree is the weight's (0 without one), the bias must match
-    it; the statistic outputs carry the input's degree times `stats` (mean 1, rstd -1)."""
+    it (`with_bias`); the statistic outputs carry the input's degree times `stats` (mean 1, rstd -1).
+    """
     x = call.args[0]
     weight = call.arg(weight_index)
     bias = call.arg(bias_index) if bias_index is not None else None
     out = call.deg(weight) if isinstance(weight, Tensor) else call.zero
-    constraints = [call.deg(bias) - out] if isinstance(bias, Tensor) else []
+    out, constraints = with_bias(call, out, bias, NORMALIZED)
     return [out, *(s * call.deg(x) for s in stats)], constraints
 
 
@@ -238,7 +265,7 @@ def running_norm(call: Call):
     degrees, the bias must match."""
     x, weight, bias = call.args[0], call.arg(1), call.arg(2)
     out = call.deg(x) + (call.deg(weight) if isinstance(weight, Tensor) else call.zero)
-    return out, [call.deg(bias) - out] if isinstance(bias, Tensor) else []
+    return with_bias(call, out, bias)
 
 
 def batch_norm(call: Call):

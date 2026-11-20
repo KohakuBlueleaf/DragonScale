@@ -58,11 +58,11 @@ def test_readme_numbers():
         ds.apply(patched, ds.analysis.absorb_plan(patched, plan, x))
         with torch.no_grad():
             change = (patched(x) - before).abs().max().item()
-        summary = ds.analysis.free_scales(patched, x).summary()
+        report = ds.analysis.free_scales(patched, x)
         if level == "absorb":
             assert change < 1e-5
         else:
             rms = before.square().mean().sqrt().item()
             assert f"changes by up to {change:.1f}, against an output RMS of {rms:.2f}" in readme
             assert any("output at the start of: 0, 2" in n for n in plan.notes)
-            assert summary["change_hidden_state"] == 0
+            assert [d for d in report.changing if d.exact] == []

@@ -1,4 +1,4 @@
-"""`PatchedLayer`: one layer plan on its module (held weakly), with its gain and kernel ops."""
+"""`PatchedLayer`: one layer plan on its module (by weak reference), with its gain and kernel ops."""
 
 import weakref
 from functools import partial

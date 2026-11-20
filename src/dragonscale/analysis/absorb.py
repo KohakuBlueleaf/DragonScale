@@ -100,7 +100,7 @@ def find_consumers(
         return None
     channels = weight.numel() if spec is None else spec.rows(weight.shape)
     k = trace.names.index(params[id(weight)])
-    if report.contains(_coeffs(params, weight, bias, [])):
+    if report.is_free(_coeffs(params, weight, bias, []), exact=True):
         return []
     chosen: list[str] = []
     for path, degree in trace.module_inputs.items():
@@ -110,7 +110,7 @@ def find_consumers(
             continue
         chosen.append(path)
         consumers = [_input_weight(modules[p], channels) for p in chosen]
-        if report.contains(_coeffs(params, weight, bias, consumers)):
+        if report.is_free(_coeffs(params, weight, bias, consumers), exact=True):
             return chosen
     return None
 
@@ -178,7 +178,7 @@ def _absorb(
         else:
             consumers.append(found)
     raise_problems(problems)
-    if not report.contains(_coeffs(params, weight, bias, consumers)):
+    if not report.is_free(_coeffs(params, weight, bias, consumers), exact=True):
         raise ValueError(f"absorbing {source} into {list(into)} is not a free direction")
 
     before = _outputs(model, inputs, kwargs)

@@ -1,7 +1,8 @@
 """The `selective` level on four small models built with the model-side rules: it patches the
 layers in the modes the method prescribes (written out by hand below, as used for the models the
 method was developed on), gives the same output at step 0 as that hand-written patch, and leaves
-no free scale that changes a hidden state in the patched part of the model."""
+no exact free scale that changes a hidden state in the patched part of the model; what remains is
+held only by a fixed-scale term (a norm in front of the output, an output gain)."""
 
 import re
 import warnings
@@ -72,6 +73,10 @@ CASES = {
     ),
 }
 OUTPUTS = r"head|out|cls_proj|patch_proj"
+# The cases left with a free scale held only by a fixed-scale term that changes a hidden state:
+# a final norm, an output gain trading with the stream, or a trained token and position table
+# concatenated with and added to the fixed-scale patches (vit)
+HELD = set(CASES) - {"lm"}
 
 
 def _build(factory):
@@ -130,17 +135,18 @@ def test_selective_matches_the_method(name):
 
     report = ds.analysis.free_scales(model, *inputs)
     assert not report.unknown
-    remaining = {n for d in report.changing for n in d.coeffs}
+    remaining = {n for d in report.changing if d.exact for n in d.coeffs}
     if name.startswith("vit"):
         # The head's layers left unpatched by the `plain` role: its bottleneck layer, read only
         # through an L2 normalization, keeps a free scale; the backbone has none
         assert remaining == {"head.mlp.4.weight", "head.mlp.4.bias"}
     else:
         assert remaining == set()
-    if report.weak:
-        assert any("normalization in front of the output" in n for n in plan.notes)
-    if name in ("lm_final_norm", "vit_final_norm"):
-        assert report.weak
+    # What remains is held only by a fixed-scale term; the plan's notes name it
+    held = [d for d in report.changing if not d.exact]
+    assert bool(held) == (name in HELD), [d.describe() for d in held]
+    if held:
+        assert any("held only by a fixed-scale term" in n for n in plan.notes)
 
 
 def test_gains_all_and_none():
@@ -236,7 +242,12 @@ def test_frozen_parameters_are_constants():
     plan = ds.analysis.suggest(model, x)
     ds.apply(model, ds.analysis.absorb_plan(model, plan, x))
     assert not model[1].norm1.weight.requires_grad
-    assert ds.analysis.free_scales(model, x).summary()["change_hidden_state"] == 0
+    report = ds.analysis.free_scales(model, x)
+    assert [d for d in report.changing if d.exact] == []
+    # The norms' biases stay trained: each is held only by the normalized input it is added to
+    assert {n for d in report.held for n in d.coeffs if n.endswith("bias")} == {
+        f"{i}.{n}.bias" for i in (1, 2) for n in ("norm1", "norm2", "linear1")
+    }
     for p in model.parameters():
         p.requires_grad_(False)
     assert ds.analysis.free_scales(model, x).names  # nothing trained: every parameter counts

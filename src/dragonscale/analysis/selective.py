@@ -6,14 +6,13 @@ taken away in this order, each decision read from a trace of the model patched s
 1. `roles`: layers named `embed` or `qk` lose their gain; `output` layers lose it, or start it at
    `output_gain`; `plain` layers are not patched.
 2. Entries: a layer whose input depends on no parameter (an embedding lookup, a patch embedding)
-   and whose gain is in a free or weakly pinned scale that changes a hidden state. The input then
-   enters with a fixed scale.
-3. Free on its own: a gain (with its layer's bias) whose scale is free or weakly pinned by
-   itself: a layer read only by a normalization (q and k in front of a QK-norm, a layer in front
+   and whose gain is in a free scale that changes a hidden state. The input then enters with a
+   fixed scale.
+3. Free on its own: a gain (with its layer's bias) whose scale is free by itself: a layer read only by a normalization (q and k in front of a QK-norm, a layer in front
    of a norm), or held only by a fixed-scale term added to it.
-4. A stream that starts nowhere: in a free scale that changes a hidden state with every
+4. A stream that starts nowhere: in an exact free scale that changes a hidden state with every
    coefficient positive, the gain of the layer called first (the one that starts the stream).
-5. Readers: in a free or weakly pinned scale that changes a hidden state, the layers with a
+5. Readers: in a free scale that changes a hidden state, the layers with a
    negative coefficient read that scale (the output layer reads the residual stream) and lose
    their gain; a reader whose output is a model output starts its gain at `output_gain` instead,
    when that is given.
@@ -23,9 +22,10 @@ without one (`mode="unit"`, `init="ones"`, or `init="absorb"` when its rows move
 consumers): its output at the start changes unless its rows were moved. `gains="all"` keeps
 every gain (the `absorb` plan), `gains="none"` takes away every gain except `output_gain`'s.
 
-The plan's notes list what remains for the model code: free scales that change a hidden state
-(with the parameters in them), weakly pinned ones (typically a normalization in front of the
-output), and attention calls without QK-norm.
+"Free" covers both kinds of free scale: exact, and held only by a fixed-scale term
+(`analysis.report`). The plan's notes list what remains for the model code: exact free scales that
+change a hidden state (with the parameters in them), those held only by a fixed-scale term
+(typically a norm in front of the output), and attention calls without QK-norm.
 """
 
 import copy
@@ -140,10 +140,13 @@ def _trace(work: nn.Module, plan: Plan, inputs, kwargs):
 
 
 class _Spaces:
-    """The free scales of one trace: exact (`ker A`), with the weakly pinned (`ker A0`), and the
-    report for its readable directions."""
+    """The free scales of one trace: exact (`ker A`), all of them (`ker A0`), and the report for
+    their readable directions."""
 
     def __init__(self, trace: DegreeTrace):
+        # A bias held only by the fixed-scale product it is added to: no choice of gains changes
+        # that hold, so the decisions read the trace with those anchors as constraints
+        trace = trace.biases_fixed()
         self.trace = trace
         self.names = trace.names
         hard = trace.matrix()
@@ -158,10 +161,12 @@ class _Spaces:
         return s
 
     def changing(self) -> list[dict[str, float]]:
-        """Readable free and weakly pinned scales that change a hidden state."""
-        found = [d.coeffs for d in self.report.changing]
-        found += [d.coeffs for d in self.report.weak if d.changes_hidden_state]
-        return found
+        """Readable free scales (both kinds) that change a hidden state."""
+        return [d.coeffs for d in self.report.changing]
+
+    def exact_changing(self) -> list[dict[str, float]]:
+        """Readable exact free scales that change a hidden state."""
+        return [d.coeffs for d in self.report.changing if d.exact]
 
 
 def _selective(
@@ -223,7 +228,7 @@ def _decide(work, base: Plan, state: _State, inputs, kwargs) -> None:
             if p in gain_of and p not in state.fixed and state.has_gain(p)
         ]
 
-        # 3. Free on its own (exact or weakly pinned)
+        # 3. Free on its own (either kind)
         alone = []
         for path in open_paths:
             coeffs = {gain_of[path]: 1.0}
@@ -239,10 +244,10 @@ def _decide(work, base: Plan, state: _State, inputs, kwargs) -> None:
         # 4. A stream that starts nowhere: the first-called gain of an all-positive free scale
         order = {p: i for i, p in enumerate(trace.module_inputs)}
         starts = set()
-        for d in spaces.report.changing:
-            if any(c < 0 for c in d.coeffs.values()):
+        for coeffs in spaces.exact_changing():
+            if any(c < 0 for c in coeffs.values()):
                 continue
-            paths = [layer_of[n] for n in d.coeffs if n in layer_of and layer_of[n] in open_paths]
+            paths = [layer_of[n] for n in coeffs if n in layer_of and layer_of[n] in open_paths]
             if paths:
                 starts.add(min(paths, key=order.__getitem__))
         for path in starts:
@@ -277,6 +282,8 @@ def _notes(work, plan: Plan, inputs, kwargs, state: _State) -> list[str]:
     trace, _, _ = _trace(work, plan, inputs, kwargs)
     report = solve(trace)
     for d in report.changing:
+        if not d.exact:
+            continue  # in report.notes
         notes.append(
             "a free scale that changes a hidden state remains: "
             + " ".join(f"{c:+g} {n}" for n, c in d.coeffs.items())

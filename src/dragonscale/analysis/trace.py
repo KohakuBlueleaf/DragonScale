@@ -7,7 +7,7 @@ depend on data. Unit-row weights are computed with plain torch ops during the tr
 """
 
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import torch
 from torch import Tensor, nn
@@ -37,7 +37,9 @@ class DegreeTrace:
     (`module_inputs`, by path, in first-call order), the q and k degrees of every attention
     call (`attention`), and the modules whose first input depends on no parameter (`entries`:
     an embedding lookup, a patch embedding of the input), and the modules with a layer type whose
-    output reaches a model output through view and layout ops only (`outputs`). A source is the module path and op that set the constraint.
+    output reaches a model output through view and layout ops only (`outputs`). A source is the
+    module path and op that set the constraint; an anchor's source also names its fixed-scale
+    term.
     """
 
     names: list[str]
@@ -46,6 +48,7 @@ class DegreeTrace:
     sources: list[str] = field(default_factory=list)
     anchors: list[Tensor] = field(default_factory=list)
     anchor_sources: list[str] = field(default_factory=list)
+    anchor_bias: list[bool] = field(default_factory=list)
     activations: list[Tensor] = field(default_factory=list)
     unknown: Counter = field(default_factory=Counter)
     module_inputs: dict[str, Tensor] = field(default_factory=dict)
@@ -62,6 +65,20 @@ class DegreeTrace:
         """The stacked anchors, `[anchors, groups]` (one zero row when there is none)."""
         k = len(self.names)
         return torch.stack(self.anchors) if self.anchors else torch.zeros(1, k).double()
+
+    def biases_fixed(self) -> "DegreeTrace":
+        """This trace with the anchors set by a bias (added to a fixed-scale product) turned into
+        ordinary constraints."""
+        keep = [i for i, b in enumerate(self.anchor_bias) if not b]
+        moved = [i for i, b in enumerate(self.anchor_bias) if b]
+        return replace(
+            self,
+            constraints=self.constraints + [self.anchors[i] for i in moved],
+            sources=self.sources + [self.anchor_sources[i] for i in moved],
+            anchors=[self.anchors[i] for i in keep],
+            anchor_sources=[self.anchor_sources[i] for i in keep],
+            anchor_bias=[False] * len(keep),
+        )
 
     def degrees(self) -> Tensor:
         """The stacked degrees of every data-dependent tensor, `[tensors, groups]`."""
@@ -81,6 +98,7 @@ class _DegreeRecorder(TorchDispatchMode):
         self.touched: set[int] = {id(p) for p in params}
         self.zeros: set[int] = set()  # tensors known to be exactly zero: any degree fits them
         self.source: dict[int, str] = {}  # tensor -> the layer whose output it is a view of
+        self.made_by: dict[int, str] = {}  # tensor -> the innermost module whose output it is
         self.alive: list[Tensor] = []
         self.paths: list[str] = []
         for k, param in enumerate(params):
@@ -94,15 +112,29 @@ class _DegreeRecorder(TorchDispatchMode):
     def degree_of(self, tensor: Tensor) -> Tensor:
         return self.degree.get(id(tensor), self.zero)
 
+    def fixed_term(self, fixed: object) -> str:
+        """A readable name for the fixed-scale term of an anchor."""
+        if isinstance(fixed, Tensor):
+            if id(fixed) in self.made_by:
+                return f"output of {self.made_by[id(fixed)]}"
+            return "the model input" if id(fixed) in self.data else "a constant or buffer"
+        if isinstance(fixed, str):
+            return fixed
+        return "a constant"
+
     def constrain(self, vector: Tensor | Anchor, op: str) -> None:
         anchor = isinstance(vector, Anchor)
+        fixed = vector.fixed if anchor else None
+        bias = vector.bias if anchor else False
         vector = vector.vector if anchor else vector
         if vector.abs().max().item() <= 1e-12:
             return
         source = f"{(self.paths[-1] or 'model') if self.paths else 'model'}: {op}"
         if anchor:
+            source += f" with {self.fixed_term(fixed)}"
             self.trace.anchors.append(vector)
             self.trace.anchor_sources.append(source)
+            self.trace.anchor_bias.append(bias)
         else:
             self.trace.constraints.append(vector)
             self.trace.sources.append(source)
@@ -135,6 +167,9 @@ class _DegreeRecorder(TorchDispatchMode):
         if rule is passthrough and first is not None and id(first) in self.source:
             for t in outputs:
                 self.source[id(t)] = self.source[id(first)]
+        if rule is passthrough and first is not None and id(first) in self.made_by:
+            for t in outputs:
+                self.made_by.setdefault(id(t), self.made_by[id(first)])
         for vector in constraints:
             self.constrain(vector, name)
         degrees = degrees if isinstance(degrees, list) else [degrees] * len(outputs)
@@ -188,6 +223,9 @@ def trace_degrees(model: nn.Module, *inputs, **kwargs) -> DegreeTrace:
 
     def leave(module: nn.Module, args, out) -> None:
         path = recorder.paths.pop()
+        for t in tree_leaves(out):
+            if isinstance(t, Tensor) and path:
+                recorder.made_by.setdefault(id(t), path)
         if layer_type_of(module) is not None:
             for t in tree_leaves(out):
                 if isinstance(t, Tensor):

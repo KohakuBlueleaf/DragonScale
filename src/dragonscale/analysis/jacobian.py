@@ -20,7 +20,8 @@ class ScaleJacobian:
     directions: Tensor
 
     def pinning(self, s: Tensor) -> float:
-        """`|J s| / (|J| |s|)`: 0 for a free direction, small for a weakly pinned one."""
+        """`|J s| / (|J| |s|)`: 0 for an exact free direction, small for one held only by a
+        fixed-scale term."""
         scale = self.matrix.norm().item() * s.norm().item()
         return (self.matrix @ s).norm().item() / max(scale, 1e-300)
 

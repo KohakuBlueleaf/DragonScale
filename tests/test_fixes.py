@@ -108,7 +108,7 @@ def test_in_place_relu_keeps_the_free_scale():
     for inplace in (False, True):
         model = nn.Sequential(nn.Linear(8, 8, bias=False), nn.ReLU(inplace), nn.Linear(8, 8))
         report = _report(model, x)
-        assert report.contains({"0.weight": 1, "2.weight": -1}), inplace
+        assert report.is_free({"0.weight": 1, "2.weight": -1}), inplace
 
 
 class _Normalized(nn.Module):
@@ -136,7 +136,7 @@ class _Normalized(nn.Module):
 def test_vector_norms_have_rules(how):
     report = _report(_Normalized(how), torch.randn(4, 8))
     assert not report.unknown
-    assert report.contains({"inner.weight": 1})
+    assert report.is_free({"inner.weight": 1})
 
 
 class _MoreOps(nn.Module):
@@ -158,7 +158,7 @@ class _MoreOps(nn.Module):
 def test_more_ops_have_rules():
     report = _report(_MoreOps(), torch.randn(4, 8))
     assert not report.unknown
-    assert report.contains({"a.weight": 1, "b.weight": 1})
+    assert report.is_free({"a.weight": 1, "b.weight": 1})
 
 
 class _Unknown(nn.Module):
@@ -203,7 +203,7 @@ def test_trace_uses_plain_ops_whatever_the_backend():
     op = patched.unit_row_op(model[0][0].weight)
     patched._ops[x.device] = dataclasses.replace(op, forward=opaque)
     report = free_scales(model, x)
-    assert report.contains({"0.0.gain": 1, "0.0.bias": 1})
+    assert report.is_free({"0.0.gain": 1, "0.0.bias": 1})
 
 
 # Eval-mode cache
@@ -265,7 +265,7 @@ def test_a_biased_layer_read_by_a_norm():
     x = torch.randn(2, 4, 6, 6, dtype=torch.float64)
     model = _ConvNorm(4).double()
     report = free_scales(model, x)
-    assert report.contains({"conv.weight": 1, "conv.bias": 1})
+    assert report.is_free({"conv.weight": 1, "conv.bias": 1})
     trace = ds.analysis.trace_degrees(model, x)
     assert find_consumers(model, "conv", trace, report) == []
     before = model(x)

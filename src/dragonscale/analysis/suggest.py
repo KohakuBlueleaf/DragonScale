@@ -48,7 +48,8 @@ def _minimal(model: nn.Module, report: FreeScales) -> Plan:
     held = holders(model)
     paths, problems = set(), []
     shapes = dict(zip(report.names, report.shapes, strict=True))
-    in_changing = {n for d in report.changing for n in d.coeffs if len(shapes[n]) >= 2}
+    exact = [d for d in report.changing if d.exact]
+    in_changing = {n for d in exact for n in d.coeffs if len(shapes[n]) >= 2}
     for name in sorted(in_changing):
         found = held.get(id(params[name]))
         if not found:
