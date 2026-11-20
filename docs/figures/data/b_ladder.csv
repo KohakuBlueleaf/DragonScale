@@ -1,6 +1,4 @@
 model,free_scales,weakly_pinned,growth_per_decade,low,high,lrs
 standard,12,0,2516.56,911.328,2790.94,9
-"unit rows, gain everywhere",12,0,257.348,241.024,322.019,10
-+ pair moves,3,0,12.9101,11.93,14.1208,10
-all rules but the output norm kept,0,1,7.78487,7.15383,8.18898,10
-all rules,0,0,1.10374,1.08008,1.12527,10
+DragonScale + output norm,0,1,7.78487,7.15383,8.18898,10
+DragonScale,0,0,1.10374,1.08008,1.12527,10

@@ -194,11 +194,11 @@ scripts: [docs/figures](docs/figures).
 The patched model's stays between 2 and 3.6 up to learning rate 3.2. Crosses: every fp16 AMP run
 of the standard model went non-finite there.
 
-<picture><source media="(prefers-color-scheme: dark)" srcset="docs/figures/b_ladder_dark.png"><img alt="Free scales counted by the analysis against hidden-state growth per 10x learning rate, five versions of the model" src="docs/figures/b_ladder.png" width="560"></picture>
+<picture><source media="(prefers-color-scheme: dark)" srcset="docs/figures/b_ladder_dark.png"><img alt="Free scales counted by the analysis against hidden-state growth per 10x learning rate, the standard model, DragonScale with the output norm kept, and DragonScale" src="docs/figures/b_ladder.png" width="560"></picture>
 
-**B.** 5 seeds, five versions of the same model. Growth falls as the free scales that change a
-hidden state are removed, down to 1.1x at zero. Keeping the norm in front of the output layer
-leaves one weakly pinned scale and 7.8x.
+**B.** 5 seeds. The standard model has 12 free scales that change a hidden state, and its hidden
+state grows about 2,500x per 10x learning rate. DragonScale has none and grows 1.1x. Keeping the
+norm in front of the output layer leaves one weakly pinned scale and 7.8x.
 
 <picture><source media="(prefers-color-scheme: dark)" srcset="docs/figures/c_angle_dark.png"><img alt="Angle a unit row turns per step times sqrt(t), against step" src="docs/figures/c_angle.png" width="560"></picture>
 

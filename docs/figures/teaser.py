@@ -215,8 +215,6 @@ def ladder_panel(ax, theme):
     t, c = THEMES[theme], SLOTS[theme]
     data = rows("b_ladder.csv")
     ys = list(range(len(data)))[::-1]
-    short = {"unit rows, gain everywhere": "unit rows, gains", "all rules but the output norm kept":
-             "all rules, final norm kept"}  # fmt: skip
     for y, r in zip(ys, data, strict=True):
         color = c[MODEL["standard"]] if r["model"] == "standard" else c[MODEL["patched"]]
         ax.plot(
@@ -226,7 +224,7 @@ def ladder_panel(ax, theme):
         count = int(r["free_scales"])
         ax.annotate(f"{count} free scale{'s' if count != 1 else ''}", (r["high"], y), xytext=(8, 0), textcoords="offset points",
                     va="center", fontsize=FONT - 2, color=t["muted"])  # fmt: skip
-    ax.set_yticks(ys, [short.get(r["model"], r["model"]) for r in data])
+    ax.set_yticks(ys, [r["model"] for r in data])
     ax.set(xscale="log", xlim=(0.8, 3e5), ylim=(-0.6, len(data) - 0.4))
     ax.grid(axis="y", visible=False)
     ax.set_xlabel("growth per 10x learning rate")
