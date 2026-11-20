@@ -178,8 +178,33 @@ model code, and the report's notes say which apply:
 - q and k normalized, with a gain on one side only (`ds.nn.QKNorm`);
 - LayerScale folded into the gain before it (`ds.fold_layerscale`).
 
-The patch does not fix every scale. It works per tensor, so it says nothing about how scale is
-spread across the rows or channels of one weight.
+### Limitation: scale means the scale of a whole vector
+
+Everywhere in this library a scale is one positive number per tensor: the length of a weight row,
+of a hidden-state vector, of the residual stream. A free scale rescales whole tensors, and that is
+what the analysis finds and the patch removes.
+
+How the magnitude is spread over the channels of one vector is outside its view. A hidden state
+can have a moderate overall size and still hold a few channels with extreme values, and a patched
+model can have them too. These outlier (or massive) channels are a separate problem with its own
+literature:
+
+- seen in language models ([Kovaleva et al. 2021](https://arxiv.org/abs/2105.06990),
+  [Timkey & van Schijndel 2021](https://arxiv.org/abs/2109.04404),
+  [Sun et al. 2024](https://arxiv.org/abs/2402.17762)) and in vision transformers
+  ([Darcet et al. 2024](https://arxiv.org/abs/2309.16588));
+- traced to the normalization layer and the optimizer
+  ([He et al. 2024](https://arxiv.org/abs/2405.19279),
+  [Kaul et al. 2024](https://arxiv.org/abs/2410.17174)) and to attention
+  ([Bondarenko et al. 2023](https://arxiv.org/abs/2306.12929),
+  [Gu et al. 2025](https://arxiv.org/abs/2410.10781));
+- a main obstacle to low-bit quantization
+  ([Bondarenko et al. 2021](https://arxiv.org/abs/2109.12948),
+  [Wei et al. 2022](https://arxiv.org/abs/2209.13325),
+  [Park et al. 2025](https://arxiv.org/abs/2506.19697)).
+
+The patch also leaves alone any scale the loss does see: such a scale can still grow when the
+loss asks for it.
 
 ## Results on small models
 
