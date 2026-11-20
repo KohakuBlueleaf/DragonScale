@@ -2,15 +2,21 @@
 
 <picture><source media="(prefers-color-scheme: dark)" srcset="docs/figures/teaser_dark.png"><img alt="Left: a pre-norm transformer, whose residual stream and weight pairs can trade scale freely; middle: nGPT and EDM2, which fix every scale by construction; right: DragonScale, unit rows with a gain only where the loss sees the scale. Right panels: hidden-state size against learning rate for a small language model, standard and patched, and the number of free scales against how fast the hidden state grows with the learning rate" src="docs/figures/teaser.png"></picture>
 
-Some scales in a network can change without changing what the loss sees. In a transformer MLP
-you can multiply `up` by 2 and divide `down` by 2 and get the same output. The loss gives no
-gradient along such a direction, but every optimizer step still moves the weights a little along
-it, and those moves add up. The residual stream of a pre-norm transformer is the largest case: it
-can grow while the output layer shrinks to match. We call such a direction a **free scale**.
+A **moving scale** is a scale that training can change, because a trainable tensor carries it: the
+length of a raw weight row, a gain, a norm's weight. A unit row without a gain has a fixed scale:
+nothing moves it.
 
-DragonScale finds the free scales of a PyTorch model by tracing one forward pass. It then rewrites
-the weights as rows of fixed length, with a learned gain per row only where the loss sees the
-scale. After the patch, no free scale changes a hidden state.
+A **free scale** is a moving scale that the loss does not see: rescaling it leaves the output
+unchanged, either at every size or once it is large. In a transformer MLP you can multiply `up` by
+2 and divide `down` by 2 and get the same output. The loss gives no gradient along such a
+direction, but every optimizer step still moves the weights a little along it, and those moves
+add up. The residual stream of a pre-norm transformer is the largest case: it can grow while the
+output layer shrinks to match.
+
+DragonScale finds the free scales of a PyTorch model by tracing one forward pass. It then gives
+every weight unit rows, a fixed scale, and puts a moving scale back only where the loss sees it.
+After the patch, no free scale that the weights can reach changes a hidden state; the report
+names what is left for the model code.
 
 **Contents:** [Highlights](#highlights) · [Install](#install) · [Quick start](#quick-start) ·
 [How it works](#how-it-works) · [Why scales drift](#why-scales-drift) ·
@@ -23,8 +29,9 @@ scale. After the patch, no free scale changes a hidden state.
 
 - **Finds every free scale in one forward pass** and names the tensors in each one, split into
   those that change a hidden state and those that do not.
-- **Leaves no free scale that changes a hidden state.** The tests check this on small versions of
-  a language model, a diffusion transformer, a ViT student and a ConvNeXt student.
+- **Leaves no free scale that changes a hidden state at every size.** The tests check this on
+  small versions of a language model, a diffusion transformer, a ViT student and a ConvNeXt
+  student, and that what remains is held only by a fixed-scale term the report names.
 - **Keeps the hidden state in place.** On a small language model with Adam, the standard model's
   hidden state grows about 2,500x for every 10x in learning rate; the patched model's grows 1.1x.
 - **Hand-written Triton kernels by default.** On an NVIDIA B300 the unit-row op is 1.3x to 12x
@@ -80,7 +87,7 @@ session.bake()  # back to stock modules with the trained weights, same output
 The report for this model, in part:
 
 ```text
-4 free scale(s): 4 change a hidden state, 0 change none; 0 weakly pinned; 0 op call(s) without a rule
+4 free scale(s): 4 change a hidden state, 0 change none; 0 of them held only by a fixed-scale term; 0 op call(s) without a rule
   +1 0.weight +1 1.self_attn.out_proj.weight +1 1.self_attn.out_proj.bias +1 1.linear2.weight +1 1.linear2.bias -1 2.weight
   +1 1.linear1.weight -1 1.norm2.weight -1 1.norm2.bias
 ```
@@ -88,7 +95,9 @@ The report for this model, in part:
 Each line is one free scale: scale each tensor on it by `c` to the power shown, and the output
 stays the same. The first line is the residual stream. The embedding and both layers that write
 into the stream grow together, and the output layer shrinks to match. The second is a norm's
-affine trading scale with the layer that reads it. [docs/analysis.md](docs/analysis.md) explains
+affine trading scale with the layer that reads it. A line marked `*` would be held only by a
+fixed-scale term: there the output changes, but less and less as the scale grows.
+[docs/analysis.md](docs/analysis.md) explains
 the rest of the report, and [docs/patching.md](docs/patching.md) the steps inside
 `ds.patch_model`, for when you want to edit the plan.
 
@@ -113,17 +122,27 @@ norm in front of the output layer. The report names those, and fixing them is up
 
 ## Why scales drift
 
-Give every parameter tensor $\theta_i$ a log-scale $s_i$. A **free scale** is a vector $s$ that
-leaves the output unchanged:
+Give every parameter tensor $\theta_i$ a log-scale $s_i$. A **free scale** is a way to rescale
+whole tensors, a vector $s$, whose effect on the output is zero, or goes to zero as the scale
+grows. There are two kinds, and both count as free.
+
+Exact: the output is unchanged at every scale,
 
 ```math
-f(\theta_1 e^{s_1}, \dots, \theta_n e^{s_n}) = f(\theta_1, \dots, \theta_n).
+f(\theta_1 e^{t s_1}, \dots, \theta_n e^{t s_n}) = f(\theta_1, \dots, \theta_n) \quad \text{for every } t .
 ```
 
 Examples: `up` $\times c$ with `down` $\times 1/c$; `q` $\times c$ with `k` $\times 1/c$; a norm's
 gain $\times c$ with every layer that reads it $\times 1/c$.
 
-The loss is constant along a free scale, so its gradient has no component there. For a weight $w$
+Held only by a fixed-scale term: the output changes only because a term of fixed scale (a
+fixed-scale input, a constant, a buffer) is added to the scaled one. Scale the layers that write
+to the residual stream by $c$ and the stream becomes $h = e + cB$, with $e$ the fixed-scale input.
+After a norm, the output changes by about $|e| / |cB|$: the ratio fixed / scaled, which falls like
+$1/c$ as the stream grows. The gradient along that scale falls the same way while the optimizer's
+step does not, so the scale drifts like an exact one.
+
+The loss is constant along an exact free scale, so its gradient has no component there. For a weight $w$
 whose scale is free on its own, $\langle \nabla_w L, w\rangle = 0$, and one gradient step
 $w' = w - \eta g$ gives
 
@@ -144,7 +163,10 @@ A patched layer computes with unit rows in place of its weight:
 W_{\text{eff}} = \mathrm{diag}(g)\; r\; \frac{W}{\lVert W \rVert_{\text{row}}}
 ```
 
-The length of a row no longer matters; only its direction and its gain do. Here $r$ is a fixed
+The length of a row no longer matters; only its direction and its gain do. The gain is one way
+to put a moving scale back where the loss sees it; another is to leave that layer an ordinary
+weight without unit rows, whose row length is then the moving scale (`ds.Rule(..., mode="plain")`,
+or the `plain` role of `suggest`). Here $r$ is a fixed
 row length: 1 for linears and convs, $\sqrt{\text{dim}}$ for embeddings. The raw row length no
 longer reaches the output, so its drift does nothing. The scale lives in the
 gain $g$, one number per row, which the loss does see. Without weight decay the raw rows still
@@ -156,14 +178,19 @@ Where the gains go is the one choice left:
 | `patch_model(..., gains=)` | gain on | free scales left that change a hidden state | output at the start |
 | --- | --- | --- | --- |
 | `"all"` (same as `level="absorb"`) | every patched layer | the stream, through the gains | unchanged |
-| `"selective"` (default) | only where the loss sees the scale | none | changes in the layers that lose their gain |
+| `"selective"` (default) | only where the loss sees the scale | none from the weights | changes in the layers that lose their gain |
 | `"none"` | the output layer only, with `output_gain` | none | changes in every layer |
 
 With the default, the embedding, the output layer, and q and k behind a QK-norm lose their gain.
 Their rows restart at length $r$, so the output at the start changes. In the quick start it
 changes by up to 1.9, against an output RMS of 0.61, and `ds.apply` logs the two layers. That is
 fine for training from scratch. **For a pretrained model**, use `level="absorb"`, which keeps the
-output unchanged, or plan to re-train.
+output unchanged, or plan to re-train. With `output_gain`, the output layer keeps a gain that
+trades with the stream's scale: one free scale remains, held only by the fixed-scale input.
+
+Biases keep their own scale. A bias added to a fixed-scale term (a unit-row layer without a gain,
+a norm's output) is held only by that term, and the report lists it with the notes; weight decay
+on biases, or no bias, keeps it in place.
 
 ### Model-side rules
 
@@ -173,8 +200,8 @@ model code, and the report's notes say which apply:
 - norms without an affine, or with the affine moved into the next layer (`absorb_plan` does this);
 - every input enters at a fixed scale: an embedding with unit rows, or a norm after a patch
   embedding;
-- the output layer reads the residual stream directly; a norm in front of it leaves the stream's
-  scale weakly pinned;
+- the output layer reads the residual stream directly; a norm in front of it leaves one free
+  scale: the scale of the residual stream, held only by the fixed-scale input;
 - q and k normalized, with a gain on one side only (`ds.nn.QKNorm`);
 - LayerScale folded into the gain before it (`ds.fold_layerscale`).
 
@@ -222,8 +249,8 @@ of the standard model went non-finite there.
 <picture><source media="(prefers-color-scheme: dark)" srcset="docs/figures/b_ladder_dark.png"><img alt="Free scales counted by the analysis against hidden-state growth per 10x learning rate, the standard model, DragonScale with the output norm kept, and DragonScale" src="docs/figures/b_ladder.png" width="560"></picture>
 
 **B.** 5 seeds. The standard model has 12 free scales that change a hidden state, and its hidden
-state grows about 2,500x per 10x learning rate. DragonScale has none and grows 1.1x. Keeping the
-norm in front of the output layer leaves one weakly pinned scale and 7.8x.
+state grows about 2,500x per 10x learning rate. Keeping the norm in front of the output layer
+leaves 1 free scale, and the hidden state grows 7.8x. DragonScale has none and grows 1.1x.
 
 <picture><source media="(prefers-color-scheme: dark)" srcset="docs/figures/c_angle_dark.png"><img alt="Angle a unit row turns per step times sqrt(t), against step" src="docs/figures/c_angle.png" width="560"></picture>
 

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dragonscale"
-version = "0.2.0"
+version = "0.2.1"
 description = "Finds the free scales of a PyTorch model and rewrites its weights as unit rows with a gain only where the loss sees the scale."
 authors = [
     { name = "Shih-Ying Yeh(KohakuBlueLeaf)", email = "apolloyeh0123@gmail.com" },

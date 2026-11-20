@@ -1,4 +1,4 @@
-model,free_scales,weakly_pinned,growth_per_decade,low,high,lrs
-standard,12,0,2516.56,911.328,2790.94,9
-DragonScale + output norm,0,1,7.78487,7.15383,8.18898,10
-DragonScale,0,0,1.10374,1.08008,1.12527,10
+model,free_scales,growth_per_decade,low,high,lrs
+standard,12,2516.56,911.328,2790.94,9
+DragonScale + output norm,1,7.78487,7.15383,8.18898,10
+DragonScale,0,1.10374,1.08008,1.12527,10

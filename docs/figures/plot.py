@@ -116,8 +116,6 @@ def fig_b(theme: str):
         ax.plot(r["growth_per_decade"], y, marker="o", color=color, ms=7)
         count = int(r["free_scales"])
         text = f"{count} free scale{'s' if count != 1 else ''}"
-        if r["weakly_pinned"]:
-            text += f", {int(r['weakly_pinned'])} weakly pinned"
         ax.annotate(text, (r["high"], y), xytext=(8, 0), textcoords="offset points", va="center",
                     fontsize=8, color=t["muted"])  # fmt: skip
     ax.set_yticks(ys, [r["model"] for r in ladder])

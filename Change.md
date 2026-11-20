@@ -1,5 +1,36 @@
 # Change Log
 
+## 0.2.1 (unreleased)
+
+### A wider definition of a free scale
+
+A free scale is a way to rescale whole parameter tensors whose effect on the output is zero, or
+goes to zero as the scale grows. Until now only the first kind counted. The second kind is a scale
+held only by a fixed-scale term: the output changes only because a fixed-scale term (an input, a
+norm's output, a constant, a buffer) is added to the scaled one, by about the ratio fixed /
+scaled. Its gradient shrinks as it grows while the optimizer's step does not, so it drifts like an
+exact one. The typical case is a norm in front of the output with gains on the layers that write
+to the residual stream: that model has one free scale, the scale of the stream, where 0.2.0
+reported none.
+
+- Removed: the class "weakly pinned" and its summary key `weakly_pinned`.
+- Those directions are now free scales, counted in "change a hidden state" or "change none" with
+  the exact ones. The exact counts do not change.
+- `FreeScales.summary()` keys: `change_hidden_state`, `change_none`, `held_by_fixed_term`,
+  `ops_without_rule`. `count` is every free scale.
+- `FreeScales.weak` is removed; `changing` and `unchanging` hold both kinds (exact first),
+  `exact` and `held` list each kind, `exact_basis` spans the exact ones.
+- `FreeScales.contains` is renamed `is_free(coeffs, exact=False)`.
+- `Direction.anchors` is renamed `held_by`; `Direction.exact` tells the kind.
+- One rule for every fixed-scale term: a term whose scale no parameter can change (a norm output,
+  a unit-row layer on a fixed-scale input, a constant, a buffer, the model input) holds the scaled
+  term it is combined with, in a sum, a concatenation or as a bias. Before, a concatenation or a
+  layer's bias pinned the scale outright. The holding terms are named in the report
+  (`blocks.0: aten::add with output of in_norm`).
+- The note for a norm in front of the output says what to do: drop the gains on the layers that
+  write to the stream, or remove the norm.
+- The plans of `suggest` do not change.
+
 ## 2026-11-19 update to 0.2.0
 
 A clean break: no aliases for the removed or renamed names.
@@ -87,7 +118,7 @@ First release.
   Muon included: keeps each weight row at a fixed length and removes the part of the momentum that
   would change it.
 - `ds.analysis.free_scales`: lists the scales the loss cannot see, marks the dangerous ones and
-  the weakly pinned ones, and adds architecture notes. `suggest` builds a plan at four levels:
+  those held only by adding a fixed-scale term, and adds architecture notes. `suggest` builds a plan at four levels:
   `report`, `minimal`, `matrices`, `absorb`; `absorb_plan` moves a norm's or layer's scale into the
   next layer without changing the output.
 - Kernels: a Triton backend for the row ops (sm70 and newer) at 85-96% of memory bandwidth on large
