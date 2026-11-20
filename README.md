@@ -187,55 +187,41 @@ All figures: a small transformer language model (2 blocks, width 64, byte vocabu
 3,000 steps. Lines are medians over seeds; bands run from the lowest to the highest seed. Data and
 scripts: [docs/figures](docs/figures).
 
-<!-- Figure candidates (owner to choose): delete a candidate's block to drop it. -->
 
-<!-- candidate A -->
 <picture><source media="(prefers-color-scheme: dark)" srcset="docs/figures/a_stream_dark.png"><img alt="Hidden-state RMS against learning rate, standard and patched" src="docs/figures/a_stream.png" width="560"></picture>
 
 **A.** 5 seeds. The standard model's hidden state grows by about 2,500x per 10x learning rate.
 The patched model's stays between 2 and 3.6 up to learning rate 3.2. Crosses: every fp16 AMP run
 of the standard model went non-finite there.
-<!-- end A -->
 
-<!-- candidate B -->
 <picture><source media="(prefers-color-scheme: dark)" srcset="docs/figures/b_ladder_dark.png"><img alt="Free scales counted by the analysis against hidden-state growth per 10x learning rate, five versions of the model" src="docs/figures/b_ladder.png" width="560"></picture>
 
 **B.** 5 seeds, five versions of the same model. Growth falls as the free scales that change a
 hidden state are removed, down to 1.1x at zero. Keeping the norm in front of the output layer
 leaves one weakly pinned scale and 7.8x.
-<!-- end B -->
 
-<!-- candidate C -->
 <picture><source media="(prefers-color-scheme: dark)" srcset="docs/figures/c_angle_dark.png"><img alt="Angle a unit row turns per step times sqrt(t), against step" src="docs/figures/c_angle.png" width="560"></picture>
 
 **C.** 5 seeds, patched model, AdamW without weight decay. Once its steps are large enough, a unit
 row turns by sqrt((1 - β1) / (1 + β1)) / sqrt(t) per step, whatever the learning rate and the
 initial scale.
-<!-- end C -->
 
-<!-- candidate D -->
 <picture><source media="(prefers-color-scheme: dark)" srcset="docs/figures/d_cosine_dark.png"><img alt="Cosine-output model: hidden-state RMS and held-out loss against learning rate" src="docs/figures/d_cosine.png" width="760"></picture>
 
 **D.** 5 seeds, with a cosine (scale-invariant) output. Here a gain the loss cannot see is itself
 a free scale: with gains the hidden state still grows, without them it does not, at the same loss.
-<!-- end D -->
 
-<!-- candidate E -->
 <picture><source media="(prefers-color-scheme: dark)" srcset="docs/figures/e_fp16_amp_dark.png"><img alt="Held-out loss against learning rate in fp32 and fp16 AMP" src="docs/figures/e_fp16_amp.png" width="560"></picture>
 
 **E.** 5 seeds, fp32 and fp16 AMP. From learning rate 0.03, every fp16 AMP run of the standard
 model goes non-finite. The patched model's fp16 AMP runs follow its fp32 runs.
-<!-- end E -->
 
-<!-- candidate F -->
 <picture><source media="(prefers-color-scheme: dark)" srcset="docs/figures/f_data_and_shape_dark.png"><img alt="Hidden-state RMS on three data sources, and growth per 10x learning rate for eight widths and depths" src="docs/figures/f_data_and_shape.png" width="760"></picture>
 
 **F.** Left: three Markov data sources of different entropy, 5 seeds. Right: eight widths and
 depths, 3 seeds. The standard model's hidden state grows by 550x to 3,300x per 10x learning rate,
 the patched model's by 1.1x to 1.2x.
-<!-- end F -->
 
-<!-- End of figure candidates. -->
 
 ## Kernels and speed
 
